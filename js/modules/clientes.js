@@ -1,9 +1,12 @@
+import { DB, DEMO_MODE } from '../supabase-client.js';
+import { Utils } from '../utils.js';
+
 /**
  * ICAM 360 - Módulo de Clientes (crm_clientes)
  * CRUD completo: listar, crear, editar clientes
  */
 
-window.ModClientes = (() => {
+export const ModClientes = (() => {
 
     // ── Estado local ──────────────────────────────────
     let clientes = [];
@@ -90,12 +93,17 @@ window.ModClientes = (() => {
             return;
         }
 
-        tbody.innerHTML = data.map(c => `
+        tbody.innerHTML = data.map(c => {
+            const _e = Utils.escapeHtml;
+            return `
             <tr>
-                <td><strong style="color:var(--text-main)">${c.razon_social}</strong></td>
-                <td class="td-mono">${c.rfc || '—'}</td>
-                <td>${c.contacto_principal || '—'}</td>
-                <td>${c.telefono || '—'}</td>
+                <td>
+                    <strong style="color:var(--text-main)">${_e(c.razon_social)}</strong>
+                    ${c.agente_ventas ? `<div class="text-xs text-muted">👤 Agente: ${_e(c.agente_ventas)}</div>` : ''}
+                </td>
+                <td class="td-mono">${_e(c.rfc) || '—'}</td>
+                <td>${_e(c.contacto_principal) || '—'}</td>
+                <td>${_e(c.telefono) || '—'}</td>
                 <td>${badgeTipo(c.tipo_cliente)}</td>
                 <td class="td-mono">$${Number(c.limite_credito || 0).toLocaleString('es-MX')}</td>
                 <td>
@@ -103,7 +111,8 @@ window.ModClientes = (() => {
                         <button class="btn btn-secondary btn-sm" onclick="ModClientes.editar(${c.id})">Editar</button>
                     </div>
                 </td>
-            </tr>`).join('');
+            </tr>`;
+        }).join('');
     }
 
     // ── Modal ──────────────────────────────────────────
@@ -126,7 +135,7 @@ window.ModClientes = (() => {
                 </button>
             </div>
             <div class="modal-body">
-                <div class="form-row cols-2">
+                <div class="form-row cols-3">
                     <div class="form-group">
                         <label class="form-label">Razón Social <span class="required">*</span></label>
                         <input id="cli-razon" class="form-control" placeholder="EMPRESA SA DE CV" value="${cliente?.razon_social || ''}">
@@ -134,6 +143,10 @@ window.ModClientes = (() => {
                     <div class="form-group">
                         <label class="form-label">RFC</label>
                         <input id="cli-rfc" class="form-control" placeholder="EMP000101XXX" maxlength="13" value="${cliente?.rfc || ''}">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Agente de Ventas</label>
+                        <input id="cli-agente" class="form-control" placeholder="Nombre del agente" value="${cliente?.agente_ventas || ''}">
                     </div>
                 </div>
                 <div class="form-row cols-2">
@@ -200,21 +213,26 @@ window.ModClientes = (() => {
             tipo_cliente: document.getElementById('cli-tipo').value,
             limite_credito: parseFloat(document.getElementById('cli-credito').value) || 0,
             direccion: document.getElementById('cli-dir').value.trim() || null,
+            agente_ventas: document.getElementById('cli-agente').value.trim() || null,
             notas: document.getElementById('cli-notas').value.trim() || null,
         };
 
         if (id) {
-            const ok = await DB.update('crm_clientes', id, payload);
-            if (ok !== false) {
-                const idx = clientes.findIndex(c => c.id === id);
-                clientes[idx] = { ...clientes[idx], ...payload };
-                App.toast('Cliente actualizado', 'success');
+            const res = await DB.update('crm_clientes', id, payload);
+            if (res.error) {
+                App.toast('Error al actualizar: ' + res.error, 'danger');
+                return;
             }
+            const idx = clientes.findIndex(c => c.id === id);
+            clientes[idx] = { ...clientes[idx], ...payload };
+            App.toast('Cliente actualizado', 'success');
         } else {
-            const newId = Math.max(0, ...clientes.map(c => c.id)) + 1;
-            const nuevo = { id: newId, ...payload };
-            clientes.push(nuevo);
-            await DB.insert('crm_clientes', payload);
+            const res = await DB.insert('crm_clientes', payload);
+            if (res.error) {
+                App.toast('Error al crear: ' + res.error, 'danger');
+                return;
+            }
+            if (res) clientes.push(res);
             App.toast('Cliente creado', 'success');
         }
 

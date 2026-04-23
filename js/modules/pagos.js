@@ -1,7 +1,10 @@
+import { DB, DEMO_MODE } from '../supabase-client.js';
+import { Utils } from '../utils.js';
+
 /**
  * ICAM 360 - Módulo de Cobranza (ops_pagos)
  */
-window.ModPagos = (() => {
+export const ModPagos = (() => {
     let pagos = [];
     let contratos = [];
     let filtro = '';
@@ -85,17 +88,18 @@ window.ModPagos = (() => {
             const cobrado = calcularTotalPagado(c);
             const saldo = (c.monto_total || 0) - cobrado;
             const estatus = getEstatusPago(saldo, c.monto_total);
+            const _e = Utils.escapeHtml;
 
             return `
             <tr>
-                <td class="td-mono">${c.folio}</td>
-                <td><strong>${c.razon_social}</strong></td>
+                <td class="td-mono">${_e(c.folio)}</td>
+                <td><strong>${_e(c.razon_social)}</strong></td>
                 <td class="td-mono">$${Number(c.monto_total || 0).toLocaleString('es-MX')}</td>
                 <td class="td-mono text-success">$${Number(cobrado).toLocaleString('es-MX')}</td>
                 <td class="td-mono ${saldo > 0 ? 'text-danger' : 'text-gray'}">
                     $${Number(saldo).toLocaleString('es-MX')}
                 </td>
-                <td>${badgePago(estatus)}</td>
+                <td>${Utils.badgePago(estatus)}</td>
                 <td>
                     <button class="btn btn-secondary btn-sm" onclick="ModPagos.verDetalle(${c.id})">Historial</button>
                     <button class="btn btn-primary btn-sm" onclick="ModPagos.abrirModalPago(${c.id})">Abonar</button>
@@ -121,14 +125,8 @@ window.ModPagos = (() => {
         return 'parcial';
     }
 
-    function badgePago(estatus) {
-        const map = {
-            'pendiente': '<span class="badge badge-danger">Pendiente</span>',
-            'parcial':   '<span class="badge badge-warning">Pago Parcial</span>',
-            'liquidado': '<span class="badge badge-success">Liquidado</span>'
-        };
-        return map[estatus] || estatus;
-    }
+    // badgePago delegated to Utils
+    const badgePago = Utils.badgePago;
 
     function renderKPIs() {
         let totalPendiente = 0;

@@ -1,7 +1,10 @@
+import { DB, DEMO_MODE } from '../supabase-client.js';
+import { Utils } from '../utils.js';
+
 /**
  * ICAM 360 - Módulo Productos (cat_productos)
  */
-window.ModProductos = (() => {
+export const ModProductos = (() => {
     let productos = [];
     let filtro = '';
 
@@ -49,7 +52,14 @@ window.ModProductos = (() => {
 
     async function cargarProductos() {
         const raw = await DB.getAll('cat_productos', { orderBy: 'codigo' });
-        productos = raw || dataSeed();
+        
+        // Si raw es null significa que hubo un error (no hay tablas, o error RLS) -> Fallback a demo
+        // Si raw es [] significa que la tabla existe y está vacía -> Mostrar vacío real
+        if (raw === null) {
+            productos = dataSeed();
+        } else {
+            productos = raw;
+        }
         renderTabla();
     }
 
@@ -77,17 +87,20 @@ window.ModProductos = (() => {
                 <h3>Sin productos</h3><p>Agrega el primer SKU al catálogo.</p></div></td></tr>`;
             return;
         }
-        tbody.innerHTML = data.map(p => `
+        tbody.innerHTML = data.map(p => {
+            const _e = Utils.escapeHtml;
+            return `
             <tr>
-                <td class="td-mono">${p.codigo}</td>
-                <td><strong style="color:var(--text-main)">${p.nombre}</strong><br><small style="color:var(--text-muted)">${p.familia || ''}</small></td>
-                <td>${p.categoria || '—'}</td>
-                <td>${p.unidad_medida || '—'}</td>
+                <td class="td-mono">${_e(p.codigo)}</td>
+                <td><strong style="color:var(--text-main)">${_e(p.nombre)}</strong><br><small style="color:var(--text-muted)">${_e(p.familia) || ''}</small></td>
+                <td>${_e(p.categoria) || '—'}</td>
+                <td>${_e(p.unidad_medida) || '—'}</td>
                 <td class="td-mono">${p.peso_kg || '—'}</td>
                 <td class="td-mono">$${Number(p.precio_lista || 0).toLocaleString('es-MX', {minimumFractionDigits:2})}</td>
                 <td>${p.rentable ? '<span class="badge badge-success">Sí</span>' : '<span class="badge badge-gray">No</span>'}</td>
                 <td><button class="btn btn-secondary btn-sm" onclick="ModProductos.editar(${p.id})">Editar</button></td>
-            </tr>`).join('');
+            </tr>`;
+        }).join('');
     }
 
     function abrirModal(prodId = null) {
@@ -190,17 +203,17 @@ window.ModProductos = (() => {
         };
 
         if (id) {
-            await DB.update('cat_productos', id, payload);
+            const res = await DB.update('cat_productos', id, payload);
+            if (res.error) {
+                App.toast('Error al actualizar: ' + res.error, 'danger');
+                return;
+            }
             const idx = productos.findIndex(p => p.id === id);
             productos[idx] = { ...productos[idx], ...payload };
             App.toast('Producto actualizado', 'success');
         } else {
-            // Guardar en Supabase y obtener el ID generado
-            const dummyId = Math.max(0, ...productos.map(p => p.id)) + 1;
             const res = await DB.insert('cat_productos', payload);
-            
-            if (res && res.id) {
-                // Sincronizar estado local con el ID real de la BD
+            if (res && !res.error) {
                 productos.push(res);
                 
                 // Inicializar automáticamente en el inventario maestro
@@ -216,9 +229,8 @@ window.ModProductos = (() => {
                 
                 App.toast('Producto creado e inicializado en inventario', 'success');
             } else {
-                // Fallback si no hay conexión o error (usar ID temporal)
-                productos.push({ id: dummyId, ...payload });
-                App.toast('Producto creado localmente', 'warning');
+                App.toast('Error al crear producto: ' + (res?.error || 'Desconocido'), 'danger');
+                return;
             }
         }
         document.getElementById('modal-productos').remove();

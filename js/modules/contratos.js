@@ -1,9 +1,14 @@
+import { DB, DEMO_MODE } from '../supabase-client.js';
+import { Utils } from '../utils.js';
+import { PDFGenerator } from './pdf-generator.js';
+
+
 /**
  * ICAM 360 - Módulo de Contratos (ops_contratos + ops_contratos_items)
  * Tipos: renta, venta, renovacion, venta_perdida, cancelacion
  * Genera PDF genérico con jsPDF
  */
-window.ModContratos = (() => {
+export const ModContratos = (() => {
 
     let contratos = [];
     let filtro = '';
@@ -54,9 +59,10 @@ window.ModContratos = (() => {
                     <tr>
                         <th>Folio</th>
                         <th>Cliente</th>
-                        <th>Tipo</th>
+                        <th>Sistema</th>
+                        <th>Entrega</th>
+                        <th>Recolección</th>
                         <th>Importe</th>
-                        <th>Saldo</th>
                         <th>Pago</th>
                         <th>Estatus</th>
                         <th>Vencimiento</th>
@@ -75,10 +81,49 @@ window.ModContratos = (() => {
     }
 
     async function cargarContratos() {
-        const raw = await DB.getAll('ops_contratos', { orderBy: 'folio', ascending: false });
+        const [raw, itemsRaw, todasHS, todasHE] = await Promise.all([
+            DB.getAll('ops_contratos', { orderBy: 'folio', ascending: false }),
+            DB.getAll('ops_contratos_items'),
+            DB.getAll('ops_hs'),
+            DB.getAll('ops_he')
+        ]);
+        
         contratos = raw || dataSeed();
-        // Seed items
-        contratos.forEach(c => { if (!contratosItems[c.id]) contratosItems[c.id] = itemsSeed(c); });
+        const itemsDB = itemsRaw || [];
+        
+        const prods = ModProductos ? ModProductos.getProductos() : [];
+        const itemsMap = {};
+        itemsDB.forEach(it => {
+            if (!itemsMap[it.contrato_id]) itemsMap[it.contrato_id] = [];
+            const prod = prods.find(p => p.codigo === it.producto_id) || {};
+            itemsMap[it.contrato_id].push({
+                ...it,
+                codigo: it.producto_id,
+                nombre: prod.nombre || 'Producto Desconocido'
+            });
+        });
+
+        const hs = todasHS || [];
+        const he = todasHE || [];
+
+        contratos.forEach(c => { 
+            // Cargar ítems (de la tabla relacional, o fallback a JSON antiguo si existe)
+            if (itemsMap[c.id]) {
+                contratosItems[c.id] = itemsMap[c.id];
+                c.items = itemsMap[c.id]; // para compatibilidad con HS y funciones utils
+            } else if (c.items && Array.isArray(c.items) && c.items.length) {
+                // Legado JSON
+                contratosItems[c.id] = c.items;
+            } else if (!contratosItems[c.id]) {
+                contratosItems[c.id] = itemsSeed(c);
+                c.items = contratosItems[c.id];
+            }
+            
+            // Calcular estatus dinámicos para la tabla
+            c._estatusEntrega = calcularEstatusEntrega(c, hs);
+            c._estatusRecoleccion = calcularEstatusRecoleccion(c, he);
+        });
+        
         renderTabla();
     }
 
@@ -122,19 +167,21 @@ window.ModContratos = (() => {
             return;
         }
 
+        const _e = Utils.escapeHtml;
         tbody.innerHTML = data.map(c => {
             const rowHTML = `
-            <tr>
-                <td class="td-mono">${c.folio}</td>
-                <td><strong style="color:var(--text-main)">${c.razon_social || '—'}</strong></td>
-                <td>${badgeTipo(c.tipo_contrato)}</td>
-                <td class="td-mono">$${Number(c.monto_total||0).toLocaleString('es-MX')}</td>
-                <td class="td-mono" style="color:${((c.monto_total||0)-(c.anticipo||0))>0?'var(--danger)':'var(--text-muted)'}">
-                    $${Number((c.monto_total||0)-(c.anticipo||0)).toLocaleString('es-MX')}
+            <tr class="cont-row" data-id="${c.id}" style="cursor:pointer;">
+                <td class="td-mono">${_e(c.folio)}</td>
+                <td><strong style="color:var(--text-main)">${_e(c.razon_social) || '—'}</strong></td>
+                <td style="font-size:0.75rem">${_e(c.sistema) || '—'}</td>
+                <td>${Utils.getBadgeEntrega(c._estatusEntrega)}</td>
+                <td>${Utils.getBadgeRecoleccion(c._estatusRecoleccion)}</td>
+                <td class="td-mono" title="Saldo: $${Number((c.monto_total||0)-(c.anticipo||0)).toLocaleString('es-MX')}">
+                    $${Number(c.monto_total||0).toLocaleString('es-MX')}
                 </td>
-                <td>${badgePago(c.estatus_pago)}</td>
-                <td>${badgeEstatus(c.estatus)}</td>
-                <td style="font-size:0.85rem">${c.fecha_vencimiento ? `<span style="color:${colorVencimiento(c.fecha_vencimiento)};font-weight:600">${fmtFecha(c.fecha_vencimiento)}</span>` : '—'}</td>
+                <td>${Utils.badgePago(c.estatus_pago)}</td>
+                <td>${Utils.badgeEstatusContrato(c.estatus)}</td>
+                <td style="font-size:0.85rem">${c.fecha_vencimiento ? `<span style="color:${Utils.colorVencimiento(c.fecha_vencimiento)};font-weight:600">${Utils.fmtFecha(c.fecha_vencimiento)}</span>` : '—'}</td>
             </tr>`;
 
             const detailHTML = expandedId === c.id ? `
@@ -171,7 +218,12 @@ window.ModContratos = (() => {
         const items = contratosItems[c.id] || [];
         return `
         <div class="form-row cols-3" style="margin-bottom:1rem">
-            <div><span class="stat-label">Folio Raíz</span><div class="td-mono">${c.folio_raiz || c.folio}</div></div>
+            <div><span class="stat-label">Folio Raíz</span><div class="td-mono">${Utils.escapeHtml(c.folio_raiz || c.folio)}</div></div>
+            <div><span class="stat-label">Viene de (Ant)</span><div class="td-mono" style="color:var(--primary);cursor:pointer" onclick="App.navigate('contratos','${Utils.escapeHtml(c.renta_anterior)}')">${Utils.escapeHtml(c.renta_anterior) || '—'}</div></div>
+            <div><span class="stat-label">Sigue a (Post)</span><div class="td-mono" style="color:var(--primary);cursor:pointer" onclick="App.navigate('contratos','${Utils.escapeHtml(c.renta_posterior)}')">${Utils.escapeHtml(c.renta_posterior) || '—'}</div></div>
+        </div>
+        <div class="form-row cols-3" style="margin-bottom:1rem">
+            <div><span class="stat-label">Sistema</span><div style="font-weight:600;color:var(--primary)">${Utils.escapeHtml(c.sistema) || '—'}</div></div>
             <div><span class="stat-label">Días de Renta</span><div>${c.dias_renta || '—'} días</div></div>
             <div><span class="stat-label">Precio/Día</span><div class="td-mono">$${Number(c.precio_por_dia || (c.monto_total && c.dias_renta ? c.monto_total/c.dias_renta : 0)).toLocaleString('es-MX',{minimumFractionDigits:2})}</div></div>
         </div>
@@ -186,16 +238,20 @@ window.ModContratos = (() => {
                 <td class="td-mono">$${Number((i.cantidad||0)*(i.precio_unitario||0)).toLocaleString('es-MX',{minimumFractionDigits:2})}</td>
             </tr>`).join('') || '<tr><td colspan="5" style="text-align:center;color:var(--text-muted)">Sin ítems registrados</td></tr>'}</tbody>
         </table>
-        <div class="flex gap-2 mt-4">
+        <div class="flex gap-2 mt-4" style="flex-wrap:wrap">
+            <button class="btn btn-primary btn-sm" onclick="App.navigate('estado_cuenta', '${c.folio_raiz || c.folio}')">📑 Estado de Cuenta</button>
+            <button class="btn btn-success btn-sm" onclick="ModPagos.abrirModalPago(${c.id})">💰 Registrar Pago</button>
             <button class="btn btn-secondary btn-sm btn-edit-contrato" data-id="${c.id}">✏ Editar</button>
             <button class="btn btn-secondary btn-sm btn-pdf-contrato" data-id="${c.id}">📄 Generar PDF</button>
+            <button class="btn btn-warning btn-sm" onclick="ModContratos.prepararVentaPorPerdidaDesdeSeguimiento(${c.id})">⚠ Venta por Pérdida</button>
+            <button class="btn btn-secondary btn-sm" onclick="ModContratos.crearSolicitud('entrega', ${c.id})">🔂 Solicitud Entrega</button>
             <button class="btn btn-secondary btn-sm" onclick="ModHS.abrirDesdeContrato(${c.id})">🚛 + HS</button>
             <button class="btn btn-secondary btn-sm" onclick="ModHE.abrirDesdeContrato(${c.id})">📥 + HE</button>
         </div>`;
     }
 
     // ── Modal Crear/Editar Contrato ───────────────────
-    async function abrirModal(contratoId = null) {
+    async function abrirModal(contratoId = null, prefillData = null) {
         // Asegurar que los catálogos estén cargados si se entra directo
         if (ModClientes && ModClientes.getClientes().length === 0) await ModClientes.cargar();
         if (ModProductos && ModProductos.getProductos().length === 0) await ModProductos.cargar();
@@ -203,7 +259,7 @@ window.ModContratos = (() => {
         const c = contratoId ? contratos.find(x => x.id === contratoId) : null;
         const clientes = ModClientes ? ModClientes.getClientes() : [];
         const productos = ModProductos ? ModProductos.getProductos() : [];
-        const items = contratoId ? (contratosItems[contratoId] || []) : [];
+        const items = contratoId ? (contratosItems[contratoId] || []) : (prefillData?.items || []);
 
         const overlay = document.createElement('div');
         overlay.className = 'modal-overlay';
@@ -212,7 +268,7 @@ window.ModContratos = (() => {
         <div class="modal modal-xl">
             <div class="modal-header">
                 <div>
-                    <div class="modal-title">${c ? `Editar Contrato ${c.folio}` : 'Nuevo Contrato'}</div>
+                    <div class="modal-title">${c ? `Editar Contrato ${c.folio}` : (prefillData?.tipo_contrato === 'venta_perdida' ? 'Nuevo Contrato - Venta por Pérdida' : 'Nuevo Contrato')}</div>
                     <div class="modal-subtitle">Complete todos los campos del contrato</div>
                 </div>
                 <button class="modal-close" onclick="document.getElementById('modal-contrato').remove()">✕</button>
@@ -220,7 +276,7 @@ window.ModContratos = (() => {
             <div class="modal-body">
 
                 <!-- TIPO DE CONTRATO con alerta especial -->
-                <div class="form-row cols-3" style="margin-bottom:1.25rem">
+                <div class="form-row cols-4" style="margin-bottom:1.25rem">
                     <div class="form-group">
                         <label class="form-label">Tipo de Contrato <span class="required">*</span></label>
                         <select id="c-tipo" class="form-control">
@@ -229,6 +285,15 @@ window.ModContratos = (() => {
                             <option value="renovacion" ${c?.tipo_contrato==='renovacion'?'selected':''}>🔄 Renovación</option>
                             <option value="venta_perdida" ${c?.tipo_contrato==='venta_perdida'?'selected':''}>⚠ Venta por Pérdida</option>
                             <option value="cancelacion" ${c?.tipo_contrato==='cancelacion'?'selected':''}>❌ Cancelación</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Sistema <span class="required">*</span></label>
+                        <select id="c-sistema" class="form-control">
+                            <option value="">— Selecciona —</option>
+                            ${['Torres de trabajo', 'Multidireccional', 'Hamacas', 'Apuntalamientos', 'Armados', 'Vallas', 'Fletes', 'Otros'].map(s => 
+                                `<option value="${s}" ${c?.sistema===s?'selected':''}>${s}</option>`
+                            ).join('')}
                         </select>
                     </div>
                     <div class="form-group">
@@ -244,8 +309,18 @@ window.ModContratos = (() => {
                         </select>
                     </div>
                 </div>
+                <div class="form-row cols-2" style="margin-bottom:1.25rem;background:var(--primary-light);padding:.75rem;border-radius:var(--radius)">
+                    <div class="form-group">
+                        <label class="form-label">Viene de (Folio Anterior)</label>
+                        <input id="c-anterior" class="form-control td-mono" placeholder="Ej: 20001" value="${c?.renta_anterior || ''}">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Sigue a (Folio Posterior)</label>
+                        <input id="c-posterior" class="form-control td-mono" placeholder="Ej: 20005" value="${c?.renta_posterior || ''}">
+                    </div>
+                </div>
 
-                <div id="alerta-venta-perdida" class="alert alert-warning" style="display:none">
+                <div id="alerta-venta-perdida" class="alert alert-warning" style="display:${(c?.tipo_contrato==='venta_perdida' || prefillData?.tipo_contrato==='venta_perdida') ? 'flex' : 'none'}">
                     <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
                     <span>⚠ <strong>Venta por Pérdida:</strong> Al guardar se generará automáticamente una HE y HS para afectar el inventario.</span>
                 </div>
@@ -267,7 +342,7 @@ window.ModContratos = (() => {
                 <div class="form-row cols-4">
                     <div class="form-group">
                         <label class="form-label">Fecha de Contrato</label>
-                        <input id="c-fecha-contrato" type="date" class="form-control" value="${c?.fecha_contrato || hoyISO()}">
+                        <input id="c-fecha-contrato" type="date" class="form-control" value="${c?.fecha_contrato || Utils.hoyISO()}">
                     </div>
                     <div class="form-group">
                         <label class="form-label">Fecha de Inicio Real</label>
@@ -303,6 +378,49 @@ window.ModContratos = (() => {
                     <textarea id="c-dir" class="form-control">${c?.direccion_servicio||''}</textarea>
                 </div>
 
+                <div id="section-entrega" style="display:${(c?.tipo_contrato==='venta_perdida' || prefillData?.tipo_contrato==='venta_perdida') ? 'none' : 'block'}">
+                    <hr class="divider" style="margin:1rem 0">
+                    <div style="font-weight:600;color:var(--text-secondary);font-size:0.875rem;text-transform:uppercase;margin-bottom:0.75rem">Sección de Entrega</div>
+
+                    <div class="form-row cols-2">
+                        <div class="form-group">
+                            <label class="form-label">Contacto que Recibe</label>
+                            <input id="c-contacto-entrega" class="form-control" placeholder="Nombre del contacto" value="${c?.contacto_entrega||''}">
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Teléfono del Contacto</label>
+                            <input id="c-tel-contacto" class="form-control" placeholder="Teléfono" value="${c?.telefono_contacto_entrega||''}">
+                        </div>
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-label">Dirección de Entrega/Obra</label>
+                        <textarea id="c-dir-entrega" class="form-control" placeholder="Dirección específica de entrega">${c?.direccion_entrega||''}</textarea>
+                    </div>
+                </div>
+
+                <hr class="divider" style="margin:1rem 0">
+                <div style="font-weight:600;color:var(--text-secondary);font-size:0.875rem;text-transform:uppercase;margin-bottom:0.75rem">Sección de Pago</div>
+
+                <div class="form-row cols-2">
+                    <div class="form-group">
+                        <label class="form-label">Fecha de Pago</label>
+                        <input id="c-fecha-pago" type="date" class="form-control" value="${c?.fecha_pago||''}">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Forma de Pago</label>
+                        <select id="c-forma-pago" class="form-control">
+                            <option value="">— Selecciona forma de pago —</option>
+                            <option value="efectivo" ${c?.forma_pago==='efectivo'?'selected':''}>💵 Efectivo</option>
+                            <option value="transferencia" ${c?.forma_pago==='transferencia'?'selected':''}>💳 Transferencia Bancaria</option>
+                            <option value="tarjeta" ${c?.forma_pago==='tarjeta'?'selected':''}>🏧 Tarjeta de Crédito/Débito</option>
+                            <option value="cheque" ${c?.forma_pago==='cheque'?'selected':''}>📄 Cheque</option>
+                            <option value="credito" ${c?.forma_pago==='credito'?'selected':''}>📋 Crédito</option>
+                            <option value="otro" ${c?.forma_pago==='otro'?'selected':''}>⚙ Otro</option>
+                        </select>
+                    </div>
+                </div>
+
                 <div class="form-group">
                     <label class="form-label">Notas</label>
                     <textarea id="c-notas" class="form-control">${c?.notas||''}</textarea>
@@ -334,6 +452,24 @@ window.ModContratos = (() => {
         document.body.appendChild(overlay);
         overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
 
+        if (!c && prefillData) {
+            const setVal = (id, val) => {
+                const el = document.getElementById(id);
+                if (el && val !== undefined && val !== null) el.value = val;
+            };
+            setVal('c-tipo', prefillData.tipo_contrato);
+            setVal('c-sistema', prefillData.sistema);
+            setVal('c-estatus', prefillData.estatus);
+            setVal('c-cliente', prefillData.cliente_id);
+            setVal('c-vendedor', prefillData.vendedor);
+            setVal('c-anterior', prefillData.renta_anterior);
+            setVal('c-fecha-contrato', prefillData.fecha_contrato || hoyISO());
+            setVal('c-fecha-inicio', prefillData.fecha_inicio_real || hoyISO());
+            setVal('c-monto', prefillData.monto_total || 0);
+            setVal('c-notas', prefillData.notas || '');
+            setVal('c-dir', prefillData.direccion_servicio || '');
+        }
+
         // Calc vencimiento dinámico
         const calcVenc = () => {
             const inicio = document.getElementById('c-fecha-inicio').value;
@@ -350,9 +486,11 @@ window.ModContratos = (() => {
         document.getElementById('c-dias').addEventListener('input', calcVenc);
         document.getElementById('c-monto').addEventListener('input', calcVenc);
 
-        // Alerta venta perdida
+        // Alerta venta perdida y ocultar entrega
         document.getElementById('c-tipo').addEventListener('change', e => {
-            document.getElementById('alerta-venta-perdida').style.display = e.target.value === 'venta_perdida' ? 'flex' : 'none';
+            const isPerdida = e.target.value === 'venta_perdida';
+            document.getElementById('alerta-venta-perdida').style.display = isPerdida ? 'flex' : 'none';
+            document.getElementById('section-entrega').style.display = isPerdida ? 'none' : 'block';
         });
 
         // Agregar item
@@ -420,27 +558,45 @@ window.ModContratos = (() => {
 
         // Recoger items
         const items = [];
-        document.querySelectorAll('#cont-items-tbody tr').forEach(row => {
+        document.querySelectorAll('#cont-items-tbody tr').forEach((row, idx) => {
             const sel = row.querySelector('.item-prod');
             const cant = row.querySelector('.item-cant');
             const prec = row.querySelector('.item-precio');
+            
             if (sel && cant && prec && sel.value) {
                 const opt = sel.options[sel.selectedIndex];
-                items.push({
+                const partes = opt.text.split(' — ');
+                const item = {
                     producto_id: parseInt(sel.value),
-                    codigo: opt.text.split(' — ')[0],
-                    nombre: opt.text.split(' — ')[1] || '',
+                    codigo: partes[0]?.trim() || '',
+                    nombre: partes[1]?.trim() || partes[0]?.trim() || '',
                     cantidad: parseFloat(cant.value) || 0,
                     precio_unitario: parseFloat(prec.value) || 0,
-                });
+                };
+                items.push(item);
+                console.log(`✓ Item ${idx + 1}:`, item);
+            } else {
+                console.log(`✗ Item ${idx + 1} incompleto (falta: sel=${!sel}, cant=${!cant}, prec=${!prec}, valor=${sel?.value})`);
             }
         });
+        
+        if (items.length === 0) {
+            console.warn('⚠ Advertencia: No se agregaron ítems');
+        } else {
+            console.log(`✓ Total de ítems recolectados: ${items.length}`);
+        }
 
         const payload = {
             folio: document.getElementById('c-folio').value.trim(),
             cliente_id: clienteId,
             razon_social: cliente?.razon_social || '',
+            rfc_cliente: cliente?.rfc || '',
+            telefono_cliente: cliente?.telefono || '',
+            direccion_cliente: cliente?.direccion || '',
             tipo_contrato: tipo,
+            sistema: document.getElementById('c-sistema').value,
+            renta_anterior: document.getElementById('c-anterior').value,
+            renta_posterior: document.getElementById('c-posterior').value,
             estatus: document.getElementById('c-estatus').value,
             fecha_contrato: document.getElementById('c-fecha-contrato').value || null,
             fecha_inicio_real: document.getElementById('c-fecha-inicio').value || null,
@@ -450,11 +606,29 @@ window.ModContratos = (() => {
             anticipo: parseFloat(document.getElementById('c-anticipo').value) || 0,
             vendedor: document.getElementById('c-vendedor').value.trim() || null,
             direccion_servicio: document.getElementById('c-dir').value.trim() || null,
+            contacto_entrega: document.getElementById('c-contacto-entrega')?.value.trim() || null,
+            telefono_contacto_entrega: document.getElementById('c-tel-contacto')?.value.trim() || null,
+            direccion_entrega: document.getElementById('c-dir-entrega')?.value.trim() || null,
+            fecha_pago: document.getElementById('c-fecha-pago')?.value || null,
+            forma_pago: document.getElementById('c-forma-pago')?.value || null,
             notas: document.getElementById('c-notas').value.trim() || null,
-            items: items,
+            // YA NO SE GUARDAN LOS ITEMS COMO JSONB AQUI
+            // items: items,
             estatus_pago: (parseFloat(document.getElementById('c-anticipo').value) || 0) >= (parseFloat(document.getElementById('c-monto').value) || 0) ? 'liquidado' : ((parseFloat(document.getElementById('c-anticipo').value) || 0) > 0 ? 'parcial' : 'pendiente')
         };
 
+        // ── Lógica de Folio Raíz ────────────────────────
+        let folioRaiz = payload.folio;
+        if (payload.renta_anterior) {
+            const foliosAnt = payload.renta_anterior.split(',').map(f => f.trim());
+            const primerPadre = contratos.find(c => c.folio === foliosAnt[0]);
+            if (primerPadre) {
+                folioRaiz = primerPadre.folio_raiz || primerPadre.folio;
+            }
+        }
+        payload.folio_raiz = folioRaiz;
+        // ────────────────────────────────────────────────
+        
         if (id) {
             const res = await DB.update('ops_contratos', id, payload);
             if (res.error) {
@@ -463,7 +637,18 @@ window.ModContratos = (() => {
             }
             const idx = contratos.findIndex(c => c.id === id);
             contratos[idx] = { ...contratos[idx], ...payload };
+            
+            // Re-insertar items
+            if (!DEMO_MODE) {
+                await DB.deleteWhere('ops_contratos_items', 'contrato_id', id);
+                for (const it of items) {
+                    if (it.codigo && it.cantidad > 0) {
+                        await DB.insert('ops_contratos_items', { contrato_id: id, producto_id: it.codigo, cantidad: it.cantidad, precio_unitario: it.precio_unitario });
+                    }
+                }
+            }
             contratosItems[id] = items;
+            payload.items = items; // Reflejar en memoria
             App.toast('Contrato actualizado', 'success');
         } else {
             const res = await DB.insert('ops_contratos', payload);
@@ -471,17 +656,49 @@ window.ModContratos = (() => {
                 App.toast('Error al guardar: ' + res.error, 'danger');
                 return;
             }
-            // Sincronizar con el ID real de la BD
             const nuevo = { ...res }; 
+            
+            if (!DEMO_MODE && nuevo.id) {
+                for (const it of items) {
+                    if (it.codigo && it.cantidad > 0) {
+                        await DB.insert('ops_contratos_items', { contrato_id: nuevo.id, producto_id: it.codigo, cantidad: it.cantidad, precio_unitario: it.precio_unitario });
+                    }
+                }
+            }
+            
             contratos.push(nuevo);
             contratosItems[nuevo.id] = items;
-
+            nuevo.items = items; // Reflejar en memoria
+            
             // Lógica de Venta por Pérdida
             if (tipo === 'venta_perdida') {
-                await procesarVentaPerdida(nuevo, items);
+                console.log('🔄 Procesando Venta por Pérdida...');
+                try {
+                    await procesarVentaPerdida(nuevo, items);
+                } catch (err) {
+                    App.toast('Contrato creado, pero error en HS/HE automática: ' + err.message, 'danger');
+                }
             }
             App.toast('Contrato creado', 'success');
         }
+
+        // ── Actualizar Vínculos Posteriores ─────────────
+        if (payload.renta_anterior) {
+            const foliosAnt = payload.renta_anterior.split(',').map(f => f.trim());
+            for (const fAnt of foliosAnt) {
+                const anterior = contratos.find(c => c.folio === fAnt);
+                if (anterior) {
+                    let post = anterior.renta_posterior ? anterior.renta_posterior.split(',').map(f => f.trim()) : [];
+                    if (!post.includes(payload.folio)) {
+                        post.push(payload.folio);
+                        const nPost = post.join(', ');
+                        await DB.update('ops_contratos', anterior.id, { renta_posterior: nPost });
+                        anterior.renta_posterior = nPost;
+                    }
+                }
+            }
+        }
+        // ────────────────────────────────────────────────
 
         document.getElementById('modal-contrato').remove();
         expandedId = null;
@@ -489,144 +706,350 @@ window.ModContratos = (() => {
     }
 
     async function procesarVentaPerdida(contrato, items) {
-        // Generar folio HS automática
-        const folioHS = `HSP-${contrato.folio}`;
-        const folioHE = `HEP-${contrato.folio}`;
+        // Generar folios operativos seriales (evita colisiones por folio único)
+        const [folioHS, folioHE] = await Promise.all([
+            nextFolioOperativo('ops_hs', 'HS'),
+            nextFolioOperativo('ops_he', 'HE')
+        ]);
 
         // Registrar HS automática (pérdida = salida definitiva)
         const hs = {
             folio: folioHS,
-            contrato_id: contrato.id,
-            tipo: 'venta_perdida',
+            contrato_folio: contrato.folio,
+            razon_social: contrato.razon_social,
             fecha: contrato.fecha_contrato,
+            total_piezas: (items || []).reduce((s, i) => s + (parseFloat(i.cantidad) || 0), 0),
+            estatus: 'entregada',
             notas: `HS automática por Venta por Pérdida del contrato ${contrato.folio}`,
-            items,
+            items: (items || []).map(i => ({ ...i, cantidad_hs: i.cantidad })),
         };
-        await DB.insert('ops_hs', hs);
+        const resHS = await DB.insert('ops_hs', hs);
+        if (resHS?.error) throw new Error(`HS: ${resHS.error}`);
 
-        App.toast(`⚠ Venta por Pérdida: HS ${folioHS} generada automáticamente`, 'warning');
+        const he = {
+            folio: folioHE,
+            contrato_folio: contrato.folio,
+            razon_social: contrato.razon_social,
+            fecha: contrato.fecha_contrato,
+            total_piezas: (items || []).reduce((s, i) => s + (parseFloat(i.cantidad) || 0), 0),
+            estatus: 'entregada',
+            vaciado_fabricacion: false,
+            notas: `HE automática por Venta por Pérdida del contrato ${contrato.folio}`,
+            items: (items || []).map(i => ({ ...i, cantidad_recolectada: i.cantidad, estado: 'pendiente_clasificacion' })),
+        };
+        const resHE = await DB.insert('ops_he', he);
+        if (resHE?.error) throw new Error(`HE: ${resHE.error}`);
+
+        App.toast(`⚠ Venta por Pérdida: HS y HE (${folioHS}/${folioHE}) generadas`, 'warning');
+    }
+
+    async function prepararVentaPorPerdidaDesdeSeguimiento(contratoId) {
+        let contratoBase = contratos.find(c => c.id === contratoId);
+        if (!contratoBase) {
+            const todos = (await DB.getAll('ops_contratos', { orderBy: 'folio', ascending: false })) || [];
+            contratoBase = todos.find(c => c.id === contratoId);
+        }
+        if (!contratoBase) {
+            App.toast('No se encontró el contrato base', 'danger');
+            return;
+        }
+
+        const itemsContrato = (contratosItems[contratoId] && contratosItems[contratoId].length)
+            ? contratosItems[contratoId]
+            : (contratoBase.items || []);
+        if (!itemsContrato.length) {
+            App.toast('El contrato no tiene despiece para calcular pérdida', 'danger');
+            return;
+        }
+
+        const [todasHS, todasHE] = await Promise.all([DB.getAll('ops_hs'), DB.getAll('ops_he')]);
+
+        const hsContrato = (todasHS || []).filter(h => folioIgual(h.contrato_folio, contratoBase.folio));
+        const heContrato = (todasHE || []).filter(h => folioIgual(h.contrato_folio, contratoBase.folio));
+
+        const entregadoMap = {};
+        hsContrato.forEach(h => {
+            (h.items || []).forEach(it => {
+                const cantidad = parseFloat(it.cantidad_hs || it.cantidad) || 0;
+                entregadoMap[it.producto_id] = (entregadoMap[it.producto_id] || 0) + cantidad;
+            });
+        });
+
+        const recolectadoMap = {};
+        heContrato.forEach(h => {
+            (h.items || []).forEach(it => {
+                const cantidad = parseFloat(it.cantidad_recolectada || it.cantidad) || 0;
+                recolectadoMap[it.producto_id] = (recolectadoMap[it.producto_id] || 0) + cantidad;
+            });
+        });
+
+        const itemsPerdida = itemsContrato
+            .map(it => {
+                const entregado = entregadoMap[it.producto_id] || 0;
+                const recolectado = recolectadoMap[it.producto_id] || 0;
+                const faltante = Math.max(0, entregado - recolectado);
+                return faltante > 0 ? { ...it, cantidad: faltante } : null;
+            })
+            .filter(Boolean);
+
+        if (!itemsPerdida.length) {
+            App.toast('No hay equipo faltante por recolectar para cobrar como pérdida', 'warning');
+            return;
+        }
+
+        const montoTotal = itemsPerdida.reduce((sum, it) => sum + ((parseFloat(it.precio_unitario) || 0) * (parseFloat(it.cantidad) || 0)), 0);
+        abrirModal(null, {
+            tipo_contrato: 'venta_perdida',
+            sistema: contratoBase.sistema || 'Otros',
+            cliente_id: contratoBase.cliente_id,
+            renta_anterior: contratoBase.folio,
+            estatus: 'activo',
+            fecha_contrato: hoyISO(),
+            fecha_inicio_real: hoyISO(),
+            monto_total: montoTotal,
+            vendedor: contratoBase.vendedor || null,
+            direccion_servicio: contratoBase.direccion_servicio || null,
+            notas: `Generado desde seguimiento por equipo faltante de recolectar del contrato ${contratoBase.folio}`,
+            items: itemsPerdida,
+        });
     }
 
     // ── Generación de PDF ─────────────────────────────
     function generarPDF(contratoId) {
         const c = contratos.find(x => x.id === contratoId);
-        if (!c) return;
+        if (!c) {
+            App.toast('Contrato no encontrado', 'danger');
+            return;
+        }
         const items = contratosItems[contratoId] || [];
 
-        const { jsPDF } = window.jspdf;
-        const doc = new jsPDF();
-
-        // Header
-        doc.setFillColor(37, 99, 235);
-        doc.rect(0, 0, 220, 30, 'F');
-        doc.setTextColor(255, 255, 255);
-        doc.setFontSize(20);
-        doc.setFont('helvetica', 'bold');
-        doc.text('ICAM 360', 14, 14);
-        doc.setFontSize(10);
-        doc.setFont('helvetica', 'normal');
-        doc.text('ERP de Andamios — Contrato de Renta/Venta', 14, 22);
-        doc.text(`Folio: ${c.folio}`, 160, 14);
-
-        // Datos contrato
-        doc.setTextColor(0, 0, 0);
-        let y = 40;
-        doc.setFontSize(12);
-        doc.setFont('helvetica', 'bold');
-        doc.text('Información del Contrato', 14, y);
-        y += 8;
-
-        doc.setFontSize(10);
-        doc.setFont('helvetica', 'normal');
-
-        const datos = [
-            ['Cliente:', c.razon_social || '—'],
-            ['Tipo:', c.tipo_contrato?.toUpperCase() || '—'],
-            ['Estatus:', c.estatus?.toUpperCase() || '—'],
-            ['Fecha de Contrato:', fmtFecha(c.fecha_contrato)],
-            ['Inicio de Renta:', fmtFecha(c.fecha_inicio_real)],
-            ['Vencimiento:', fmtFecha(c.fecha_vencimiento)],
-            ['Días de Renta:', c.dias_renta ? `${c.dias_renta} días` : '—'],
-            ['Monto Total:', `$${Number(c.monto_total||0).toLocaleString('es-MX', {minimumFractionDigits:2})}`],
-            ['Anticipo:', `$${Number(c.anticipo||0).toLocaleString('es-MX', {minimumFractionDigits:2})}`],
-            ['Saldo:', `$${Number((c.monto_total||0)-(c.anticipo||0)).toLocaleString('es-MX', {minimumFractionDigits:2})}`],
-            ['Agente:', c.vendedor || '—'],
-        ];
-
-        datos.forEach(([lbl, val]) => {
-            doc.setFont('helvetica', 'bold');
-            doc.text(lbl, 14, y);
-            doc.setFont('helvetica', 'normal');
-            doc.text(val, 70, y);
-            y += 7;
-        });
-
-        y += 5;
-        doc.setFont('helvetica', 'bold');
-        doc.setFontSize(12);
-        doc.text('Detalle de Ítems', 14, y);
-        y += 8;
-
-        // Tabla de items
-        doc.setFillColor(241, 245, 249);
-        doc.rect(14, y - 4, 182, 8, 'F');
-        doc.setFontSize(9);
-        doc.setFont('helvetica', 'bold');
-        doc.text('Código', 16, y);
-        doc.text('Descripción', 45, y);
-        doc.text('Cant.', 130, y);
-        doc.text('P/Día', 150, y);
-        doc.text('Importe', 170, y);
-        y += 6;
-
-        doc.setFont('helvetica', 'normal');
-        items.forEach(it => {
-            doc.text(it.codigo || '', 16, y);
-            const nombre = it.nombre || '';
-            doc.text(nombre.length > 40 ? nombre.substring(0, 40) + '…' : nombre, 45, y);
-            doc.text(String(it.cantidad || 0), 130, y);
-            doc.text(`$${Number(it.precio_unitario||0).toFixed(2)}`, 150, y);
-            doc.text(`$${Number((it.cantidad||0)*(it.precio_unitario||0)).toLocaleString('es-MX',{minimumFractionDigits:2})}`, 170, y);
-            y += 7;
-        });
-
-        // Footer
-        y = 270;
-        doc.setFontSize(8);
-        doc.setTextColor(150, 150, 150);
-        doc.text(`ICAM 360 — Documento generado el ${new Date().toLocaleDateString('es-MX')}`, 14, y);
-        doc.text('Este es un documento genérico. La plantilla oficial estará disponible próximamente.', 14, y + 5);
-
-        doc.save(`Contrato_${c.folio}.pdf`);
-        App.toast(`PDF del contrato ${c.folio} descargado`, 'success');
+        try {
+            App.toast('Generando documento PDF...', 'info');
+            PDFGenerator.generate(c, items);
+            App.toast(`PDF del contrato ${c.folio} descargado exitosamente`, 'success');
+        } catch (err) {
+            console.error('Error generando PDF:', err);
+            App.toast('Error generando PDF: ' + err.message, 'danger');
+        }
     }
 
-    // ── Utilidades ────────────────────────────────────
+    // ── Utilidades (delegadas a Utils) ────────────────
     function nextFolio() {
         if (!contratos.length) return '20001';
         return String(Math.max(...contratos.map(c => parseInt(c.folio) || 20000)) + 1);
     }
-    function hoyISO() { return new Date().toISOString().split('T')[0]; }
-    function fmtFecha(f) { if (!f) return '—'; return new Date(f + 'T12:00:00').toLocaleDateString('es-MX'); }
-    function colorVencimiento(f) {
-        const dias = Math.ceil((new Date(f + 'T12:00:00') - new Date()) / 86400000);
-        if (dias < 0) return 'var(--danger)';
-        if (dias <= 5) return 'var(--warning)';
-        return 'var(--success)';
-    }
-    function badgeTipo(t) {
-        const map = { renta:'badge-info', venta:'badge-purple', renovacion:'badge-primary', venta_perdida:'badge-danger', cancelacion:'badge-gray' };
-        return `<span class="badge ${map[t]||'badge-gray'}">${(t||'—').replace('_',' ')}</span>`;
-    }
-    function badgeEstatus(e) {
-        const map = { activo:'badge-success', entrega_parcial:'badge-warning', recolectado:'badge-success', borrador:'badge-gray', renovacion:'badge-primary', cancelado:'badge-gray' };
-        return `<span class="badge ${map[e]||'badge-gray'}">${(e||'—').replace('_',' ')}</span>`;
+
+    // Aliases locales que apuntan a Utils (para compatibilidad interna)
+    const hoyISO = Utils.hoyISO;
+    const fmtFecha = Utils.fmtFecha;
+    const colorVencimiento = Utils.colorVencimiento;
+    const calcularEstatusEntrega = Utils.calcularEstatusEntrega;
+    const calcularEstatusRecoleccion = Utils.calcularEstatusRecoleccion;
+    const folioIgual = Utils.folioIgual;
+
+    async function nextFolioOperativo(tabla, prefijo) {
+        const rows = (await DB.getAll(tabla, { orderBy: 'folio', ascending: false })) || [];
+        const re = new RegExp(`^${prefijo}-(\\d+)$`);
+        let maxNum = 0;
+        rows.forEach(r => {
+            const folio = String(r?.folio || '').trim();
+            const m = folio.match(re);
+            if (m) maxNum = Math.max(maxNum, parseInt(m[1], 10) || 0);
+        });
+        return `${prefijo}-${String(maxNum + 1).padStart(3, '0')}`;
     }
 
-    function badgePago(p) {
-        const map = { pendiente:'badge-danger', parcial:'badge-warning', liquidado:'badge-success' };
-        return `<span class="badge ${map[p]||'badge-danger'}">${(p||'pendiente').toUpperCase()}</span>`;
+    async function crearSolicitud(tipo, contratoId) {
+        const c = contratos.find(x => x.id === contratoId);
+        if (!c) return;
+        const items = contratosItems[contratoId] || [];
+
+        const solicitud = {
+            tipo,
+            contrato_id: contratoId,
+            folio_contrato: c.folio,
+            fecha_programada: new Date().toISOString().split('T')[0],
+            estatus: 'pendiente',
+            datos_entrega: {
+                contacto: c.contacto_entrega,
+                telefono: c.telefono_contacto_entrega,
+                direccion: c.direccion_entrega || c.direccion_servicio
+            },
+            items: items.map(i => ({ codigo: i.producto_id || i.codigo, nombre: i.nombre, cantidad: i.cantidad }))
+        };
+
+        const res = await DB.insert('ops_solicitudes', solicitud);
+        if (res.error) {
+            App.toast('Error al crear solicitud: ' + res.error, 'danger');
+            return;
+        }
+
+        // ────────────────────────────────────────────────
+
+        document.getElementById('modal-contrato').remove();
+        expandedId = null;
+        renderTabla();
     }
 
-    return { render, getContratos: () => contratos, getItems: id => contratosItems[id] || [], generarPDF };
+    async function procesarVentaPerdida(contrato, items) {
+        const [folioHS, folioHE] = await Promise.all([
+            nextFolioOperativo('ops_hs', 'HS'),
+            nextFolioOperativo('ops_he', 'HE')
+        ]);
+
+        const hs = {
+            folio: folioHS,
+            contrato_folio: contrato.folio,
+            razon_social: contrato.razon_social,
+            fecha: contrato.fecha_contrato,
+            total_piezas: (items || []).reduce((s, i) => s + (parseFloat(i.cantidad) || 0), 0),
+            estatus: 'entregada',
+            notas: `HS automática por Venta por Pérdida del contrato ${contrato.folio}`,
+            items: (items || []).map(i => ({ ...i, cantidad_hs: i.cantidad })),
+        };
+        const resHS = await DB.insert('ops_hs', hs);
+        if (resHS?.error) throw new Error(`HS: ${resHS.error}`);
+
+        const he = {
+            folio: folioHE,
+            contrato_folio: contrato.folio,
+            razon_social: contrato.razon_social,
+            fecha: contrato.fecha_contrato,
+            total_piezas: (items || []).reduce((s, i) => s + (parseFloat(i.cantidad) || 0), 0),
+            estatus: 'entregada',
+            vaciado_fabricacion: false,
+            notas: `HE automática por Venta por Pérdida del contrato ${contrato.folio}`,
+            items: (items || []).map(i => ({ ...i, cantidad_recolectada: i.cantidad, estado: 'pendiente_clasificacion' })),
+        };
+        const resHE = await DB.insert('ops_he', he);
+        if (resHE?.error) throw new Error(`HE: ${resHE.error}`);
+
+        App.toast(`⚠ Venta por Pérdida: HS y HE (${folioHS}/${folioHE}) generadas`, 'warning');
+    }
+
+    async function prepararVentaPorPerdidaDesdeSeguimiento(contratoId) {
+        let contratoBase = contratos.find(c => c.id === contratoId);
+        if (!contratoBase) {
+            const todos = (await DB.getAll('ops_contratos', { orderBy: 'folio', ascending: false })) || [];
+            contratoBase = todos.find(c => c.id === contratoId);
+        }
+        if (!contratoBase) {
+            App.toast('No se encontró el contrato base', 'danger');
+            return;
+        }
+
+        const itemsContrato = (contratosItems[contratoId] && contratosItems[contratoId].length)
+            ? contratosItems[contratoId]
+            : (contratoBase.items || []);
+        
+        const [todasHS, todasHE] = await Promise.all([DB.getAll('ops_hs'), DB.getAll('ops_he')]);
+        const hsContrato = (todasHS || []).filter(h => Utils.folioIgual(h.contrato_folio, contratoBase.folio));
+        const heContrato = (todasHE || []).filter(h => Utils.folioIgual(h.contrato_folio, contratoBase.folio));
+
+        const entregadoMap = {};
+        hsContrato.forEach(h => {
+            (h.items || []).forEach(it => {
+                const cantidad = parseFloat(it.cantidad_hs || it.cantidad) || 0;
+                entregadoMap[it.producto_id] = (entregadoMap[it.producto_id] || 0) + cantidad;
+            });
+        });
+
+        const recolectadoMap = {};
+        heContrato.forEach(h => {
+            (h.items || []).forEach(it => {
+                const cantidad = parseFloat(it.cantidad_recolectada || it.cantidad) || 0;
+                recolectadoMap[it.producto_id] = (recolectadoMap[it.producto_id] || 0) + cantidad;
+            });
+        });
+
+        const itemsPerdida = itemsContrato
+            .map(it => {
+                const entregado = entregadoMap[it.producto_id] || 0;
+                const recolectado = recolectadoMap[it.producto_id] || 0;
+                const faltante = Math.max(0, entregado - recolectado);
+                return faltante > 0 ? { ...it, cantidad: faltante } : null;
+            })
+            .filter(Boolean);
+
+        if (!itemsPerdida.length) {
+            App.toast('No hay equipo faltante por recolectar para cobrar como pérdida', 'warning');
+            return;
+        }
+
+        const montoTotal = itemsPerdida.reduce((sum, it) => sum + ((parseFloat(it.precio_unitario) || 0) * (parseFloat(it.cantidad) || 0)), 0);
+        abrirModal(null, {
+            tipo_contrato: 'venta_perdida',
+            sistema: contratoBase.sistema || 'Otros',
+            cliente_id: contratoBase.cliente_id,
+            renta_anterior: contratoBase.folio,
+            estatus: 'activo',
+            fecha_contrato: Utils.hoyISO(),
+            fecha_inicio_real: Utils.hoyISO(),
+            monto_total: montoTotal,
+            vendedor: contratoBase.vendedor || null,
+            direccion_servicio: contratoBase.direccion_servicio || null,
+            notas: `Generado desde seguimiento por equipo faltante de recolectar del contrato ${contratoBase.folio}`,
+            items: itemsPerdida,
+        });
+    }
+
+    function generarPDF(contratoId) {
+        const c = contratos.find(x => x.id === contratoId);
+        if (!c) return;
+        const items = contratosItems[contratoId] || [];
+        try {
+            App.toast('Generando documento PDF...', 'info');
+            PDFGenerator.generate(c, items);
+        } catch (err) {
+            console.error('Error generando PDF:', err);
+            App.toast('Error generando PDF: ' + err.message, 'danger');
+        }
+    }
+
+    async function crearSolicitud(tipo, contratoId) {
+        const c = contratos.find(x => x.id === contratoId);
+        if (!c) return;
+        const items = contratosItems[contratoId] || [];
+        const solicitud = {
+            tipo,
+            contrato_id: contratoId,
+            folio_contrato: c.folio,
+            fecha_programada: new Date().toISOString().split('T')[0],
+            estatus: 'pendiente',
+            items: items.map(i => ({ codigo: i.producto_id || i.codigo, nombre: i.nombre, cantidad: i.cantidad }))
+        };
+        const res = await DB.insert('ops_solicitudes', solicitud);
+        if (res.error) {
+            App.toast('Error al crear solicitud: ' + res.error, 'danger');
+            return;
+        }
+        App.toast(`Solicitud de ${tipo} creada`, 'success');
+        if (PDFGenerator) PDFGenerator.generate(tipo === 'entrega' ? 'SOLICITUD_ENTREGA' : 'SOLICITUD_RECOLECCION', c, solicitud.items);
+    }
+
+    function nextFolio() {
+        if (!contratos.length) return '20001';
+        return String(Math.max(...contratos.map(c => parseInt(c.folio) || 20000)) + 1);
+    }
+
+    async function nextFolioOperativo(tabla, prefijo) {
+        const rows = (await DB.getAll(tabla, { orderBy: 'folio', ascending: false })) || [];
+        const re = new RegExp(`^${prefijo}-(\\d+)$`);
+        let maxNum = 0;
+        rows.forEach(r => {
+            const m = String(r?.folio || '').match(re);
+            if (m) maxNum = Math.max(maxNum, parseInt(m[1], 10) || 0);
+        });
+        return `${prefijo}-${String(maxNum + 1).padStart(3, '0')}`;
+    }
+
+    return { 
+        render, 
+        getContratos: () => contratos, 
+        getItems: id => contratosItems[id] || [], 
+        generarPDF, 
+        prepararVentaPorPerdidaDesdeSeguimiento,
+        crearSolicitud,
+        cargar: cargarContratos
+    };
 })();

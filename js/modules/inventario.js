@@ -1,8 +1,11 @@
+import { DB, DEMO_MODE } from '../supabase-client.js';
+import { Utils } from '../utils.js';
+
 /**
  * ICAM 360 - Módulo de Inventario (inv_master)
  * Dashboard de stock con estados: disponible, rentado, mantenimiento, chatarra
  */
-window.ModInventario = (() => {
+export const ModInventario = (() => {
     let inventario = [];
     let filtro = '';
 
@@ -87,8 +90,34 @@ window.ModInventario = (() => {
     }
 
     async function cargarInventario() {
-        const raw = await DB.getAll('inv_master', { orderBy: 'producto_id' });
-        inventario = raw || dataSeed();
+        const [prods, inv] = await Promise.all([
+            DB.getAll('cat_productos', { select: 'id,codigo,nombre', orderBy: 'id' }),
+            DB.getAll('inv_master', {
+                select: 'id,producto_id,cantidad_disponible,cantidad_rentada,cantidad_en_mantenimiento,cantidad_chatarra',
+                orderBy: 'producto_id'
+            })
+        ]);
+
+        if (!prods) {
+            inventario = dataSeed();
+        } else {
+            const invMap = new Map((inv || []).map(i => [i.producto_id, i]));
+            // Unir catálogo con inventario
+            inventario = prods.map(p => {
+                const stock = invMap.get(p.id) || {};
+                return {
+                    id: stock.id || null, // ID de inv_master
+                    producto_id: p.id,
+                    codigo: p.codigo,
+                    nombre: p.nombre,
+                    cantidad_disponible: stock.cantidad_disponible || 0,
+                    cantidad_rentada: stock.cantidad_rentada || 0,
+                    cantidad_en_mantenimiento: stock.cantidad_en_mantenimiento || 0,
+                    cantidad_chatarra: stock.cantidad_chatarra || 0
+                };
+            });
+        }
+        
         renderKPIs();
         renderTabla();
     }
@@ -126,6 +155,7 @@ window.ModInventario = (() => {
             return;
         }
         tbody.innerHTML = data.map(i => {
+            const _e = Utils.escapeHtml;
             const disp = i.cantidad_disponible || 0;
             const rent = i.cantidad_rentada || 0;
             const mto  = i.cantidad_en_mantenimiento || 0;
@@ -135,8 +165,8 @@ window.ModInventario = (() => {
             const barClass = usoPct >= 80 ? 'high' : usoPct >= 50 ? 'mid' : 'low';
             return `
             <tr onclick="ModInventario.verDetalle(${i.id})">
-                <td class="td-mono">${i.codigo}</td>
-                <td><strong style="color:var(--text-main)">${i.nombre}</strong></td>
+                <td class="td-mono">${_e(i.codigo)}</td>
+                <td><strong style="color:var(--text-main)">${_e(i.nombre)}</strong></td>
                 <td>
                     <span style="color:var(--success);font-weight:700;font-size:0.9rem">${disp}</span>
                 </td>
@@ -178,9 +208,10 @@ window.ModInventario = (() => {
             <div class="modal-body">
                 <div class="form-group">
                     <label class="form-label">Producto <span class="required">*</span></label>
+                    <input id="aj-prod-search" type="text" class="form-control" placeholder="Buscar por código o nombre…" autocomplete="off">
                     <select id="aj-prod" class="form-control">
                         <option value="">— Selecciona producto —</option>
-                        ${inventario.map(i => `<option value="${i.id}">${i.codigo} — ${i.nombre}</option>`).join('')}
+                        ${inventario.map(i => `<option value="${i.producto_id}">${i.codigo} — ${i.nombre}</option>`).join('')}
                     </select>
                 </div>
                 <div class="form-row cols-2">
@@ -211,24 +242,93 @@ window.ModInventario = (() => {
         document.body.appendChild(overlay);
         overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
         document.getElementById('btn-guardar-ajuste').addEventListener('click', aplicarAjuste);
+        const searchInput = document.getElementById('aj-prod-search');
+        searchInput.addEventListener('input', filtrarProductosAjuste);
+        searchInput.addEventListener('keydown', seleccionarPrimerResultadoConEnter);
     }
 
-    function aplicarAjuste() {
+    function normalizarTexto(valor) {
+        return (valor || '')
+            .toString()
+            .toLowerCase()
+            .normalize('NFD')
+            .replace(/[\u0300-\u036f]/g, '')
+            .trim();
+    }
+
+    function filtrarProductosAjuste(e) {
+        const texto = normalizarTexto(e.target.value);
+        const select = document.getElementById('aj-prod');
+        const searchInput = document.getElementById('aj-prod-search');
+        if (!select) return;
+
+        const selectedValue = select.value;
+        const filtered = inventario.filter(i =>
+            normalizarTexto(i.codigo).includes(texto) ||
+            normalizarTexto(i.nombre).includes(texto)
+        );
+
+        select.innerHTML = `
+            <option value="">— Selecciona producto —</option>
+            ${filtered.map(i => `<option value="${i.producto_id}">${i.codigo} — ${i.nombre}</option>`).join('')}
+        `;
+
+        if (!filtered.length) {
+            select.innerHTML = `<option value="">Sin coincidencias</option>`;
+            select.value = '';
+            return;
+        }
+
+        if (filtered.some(i => String(i.producto_id) === selectedValue)) {
+            select.value = selectedValue;
+            return;
+        }
+
+        if (filtered.length === 1) {
+            select.value = String(filtered[0].producto_id);
+            if (searchInput) {
+                searchInput.value = `${filtered[0].codigo} — ${filtered[0].nombre}`;
+            }
+        }
+    }
+
+    function seleccionarPrimerResultadoConEnter(e) {
+        if (e.key !== 'Enter') return;
+        const select = document.getElementById('aj-prod');
+        if (!select) return;
+        if (select.options.length > 1) {
+            select.value = select.options[1].value;
+        }
+    }
+
+    async function aplicarAjuste() {
         const prodId = parseInt(document.getElementById('aj-prod').value);
         const campo = document.getElementById('aj-campo').value;
         const cant = parseInt(document.getElementById('aj-cant').value);
         const motivo = document.getElementById('aj-motivo').value.trim();
 
         if (!prodId || !motivo) { App.toast('Completa todos los campos', 'danger'); return; }
-        const inv = inventario.find(i => i.id === prodId);
+        const inv = inventario.find(i => i.producto_id === prodId);
         if (!inv) return;
 
         inv[campo] = cant;
-        DB.update('inv_master', prodId, { [campo]: cant });
+        
+        if (inv.id) {
+            await DB.update('inv_master', inv.id, { [campo]: cant });
+        } else {
+            // Si no existía en inv_master, lo creamos
+            const res = await DB.insert('inv_master', {
+                producto_id: prodId,
+                almacen: 'Principal',
+                [campo]: cant
+            });
+            if (res && res.id) inv.id = res.id;
+        }
+
         renderKPIs();
         renderTabla();
         document.getElementById('modal-ajuste-inv').remove();
-        App.toast('Inventario ajustado', 'success');
+        App.toast('Inventario ajustado y persistido', 'success');
     }
 
     function verDetalle(invId) {
@@ -300,7 +400,16 @@ window.ModInventario = (() => {
                 const nuevaCant = Math.max(0, (i.cantidad_disponible || 0) + delta);
                 i.cantidad_disponible = nuevaCant;
                 // Persistir en Supabase
-                await DB.update('inv_master', i.id, { cantidad_disponible: nuevaCant });
+                if (i.id) {
+                    await DB.update('inv_master', i.id, { cantidad_disponible: nuevaCant });
+                } else {
+                    const res = await DB.insert('inv_master', {
+                        producto_id: productoId,
+                        almacen: 'Principal',
+                        cantidad_disponible: nuevaCant
+                    });
+                    if (res && res.id) i.id = res.id;
+                }
             }
         }
     };

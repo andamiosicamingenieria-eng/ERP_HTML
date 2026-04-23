@@ -1,10 +1,13 @@
+import { DB, DEMO_MODE } from '../supabase-client.js';
+import { Utils } from '../utils.js';
+
 /**
  * ICAM 360 - Módulo Sub-Arrendamiento (ops_subarriendos)
  * Gestión de equipo sub-arrendado a proveedores externos:
  *   → Al recibir equipo: genera HE automática + suma a inventario
  *   → Al devolver equipo: genera HS automática + resta de inventario
  */
-window.ModSubArr = (() => {
+export const ModSubArr = (() => {
     let saData = [];
     let filtro = '';
     let filtroEstatus = 'todos';
@@ -79,6 +82,7 @@ window.ModSubArr = (() => {
                         <th>Proveedor</th>
                         <th>Contrato Destino</th>
                         <th>Fecha Inicio</th>
+                        <th>Devolución</th>
                         <th>Días</th>
                         <th>Piezas</th>
                         <th>Costo Acum.</th>
@@ -94,16 +98,21 @@ window.ModSubArr = (() => {
 
         document.getElementById('sa-search').addEventListener('input', e => { filtro = e.target.value; renderTabla(); });
         document.getElementById('sa-filtro-est').addEventListener('change', e => { filtroEstatus = e.target.value; renderTabla(); });
-        document.getElementById('btn-nuevo-sa').addEventListener('click', () => abrirModalNuevo());
+        document.getElementById('btn-nuevo-sa').onclick = () => ModSubArr.abrirModalNuevo();
         cargarSA();
     }
 
     // ── Carga de datos ────────────────────────────────────────
     async function cargarSA() {
-        const raw = await DB.getAll('ops_subarriendos', { orderBy: 'folio', ascending: false });
-        saData = raw || dataSeed();
-        renderKPIs();
-        renderTabla();
+        try {
+            const raw = await DB.getAll('ops_subarriendos', { orderBy: 'folio', ascending: false });
+            saData = raw || dataSeed();
+            renderKPIs();
+            renderTabla();
+        } catch (err) {
+            console.error('SubArr: Error en cargarSA:', err);
+            App.toast('Error al cargar datos de Sub-Arrendamiento', 'danger');
+        }
     }
 
     function dataSeed() {
@@ -115,7 +124,8 @@ window.ModSubArr = (() => {
                 contrato_destino_folio: '20001',
                 razon_social_destino: 'CONSTRUCTORA TORRES DEL NORTE SA DE CV',
                 fecha_inicio: '2026-03-10',
-                fecha_devolucion: null,
+                dias_renta: 30,
+                fecha_devolucion: '2026-04-09',
                 costo_unitario_dia: 8.50,
                 estatus: 'activo',
                 folio_he: 'HE-SARR-001',
@@ -134,6 +144,7 @@ window.ModSubArr = (() => {
                 razon_social_destino: 'EDIFICACIONES MONTERREY SA DE CV',
                 fecha_inicio: '2026-02-15',
                 fecha_devolucion: '2026-03-20',
+                dias_renta: 33,
                 costo_unitario_dia: 6.00,
                 estatus: 'devuelto',
                 folio_he: 'HE-SARR-002',
@@ -189,6 +200,10 @@ window.ModSubArr = (() => {
             const dias  = calcDias(s);
             const costo = calcCosto(s);
             const pzas  = totalPiezas(s);
+            const isVencido = s.estatus === 'activo' && s.fecha_devolucion && (new Date(s.fecha_devolucion + 'T12:00:00') < new Date());
+            const devolucionHtml = s.fecha_devolucion
+                ? `<span style="font-weight:700;color:${isVencido ? 'var(--danger)' : 'var(--text-main)'}">${fmtFecha(s.fecha_devolucion)}</span>`
+                : '—';
             return `
             <tr>
                 <td class="td-mono" style="font-weight:700">${s.folio}</td>
@@ -198,6 +213,7 @@ window.ModSubArr = (() => {
                     <div style="font-size:0.72rem;color:var(--text-muted)">${truncar(s.razon_social_destino, 28)}</div>
                 </td>
                 <td>${fmtFecha(s.fecha_inicio)}</td>
+                <td>${devolucionHtml}</td>
                 <td class="td-mono">${dias} días</td>
                 <td class="td-mono">${pzas} pzas</td>
                 <td class="td-mono" style="font-weight:700;color:var(--warning)">$${costo.toLocaleString('es-MX', { minimumFractionDigits: 2 })}</td>
@@ -213,9 +229,29 @@ window.ModSubArr = (() => {
     }
 
     // ── Modal: Nuevo Sub-Arrendamiento ────────────────────────
-    function abrirModalNuevo() {
-        const productos  = ModProductos  ? ModProductos.getProductos()   : [];
-        const contratos  = ModContratos  ? ModContratos.getContratos()   : [];
+    async function abrirModalNuevo() {
+        console.log('SubArr: Abriendo modal nuevo...');
+        // Asegurar que los datos base estén cargados
+        const ModP = window.ModProductos;
+        const ModC = window.ModContratos;
+
+        try {
+            if (ModP && ModP.getProductos().length === 0) {
+                console.log('SubArr: Cargando productos...');
+                await ModP.cargar();
+            }
+            if (ModC && ModC.getContratos().length === 0) {
+                console.log('SubArr: Cargando contratos...');
+                await ModC.cargar();
+            }
+        } catch (err) {
+            console.error('SubArr: Error cargando datos base:', err);
+            App.toast('Error al cargar datos necesarios. Revisa la consola.', 'danger');
+        }
+
+        const productos  = ModP ? ModP.getProductos() : [];
+        const contratos  = ModC ? ModC.getContratos() : [];
+        console.log(`SubArr: Datos listos. Prods: ${productos.length}, Contratos: ${contratos.length}`);
         const overlay = document.createElement('div');
         overlay.className = 'modal-overlay';
         overlay.id = 'modal-sa-nuevo';
@@ -247,7 +283,7 @@ window.ModSubArr = (() => {
 
                 <div class="form-row cols-2">
                     <div class="form-group">
-                        <label class="form-label">Contrato de Destino <span class="required">*</span></label>
+                        <label class="form-label">Contrato de Destino</label>
                         <select id="sa-contrato" class="form-control">
                             <option value="">— Selecciona contrato —</option>
                             ${contratos.filter(c => ['activo','entrega_parcial','borrador'].includes(c.estatus)).map(c =>
@@ -258,6 +294,17 @@ window.ModSubArr = (() => {
                     <div class="form-group">
                         <label class="form-label">Costo Unitario / Día (por pieza) <span class="required">*</span></label>
                         <input id="sa-costo-dia" type="number" class="form-control" placeholder="0.00" min="0" step="0.01">
+                    </div>
+                </div>
+
+                <div class="form-row cols-2">
+                    <div class="form-group">
+                        <label class="form-label">Días de renta <span class="required">*</span></label>
+                        <input id="sa-dias-renta" type="number" class="form-control" min="1" step="1" value="1">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Fecha de Devolución (automática)</label>
+                        <input id="sa-fecha-devolucion" type="date" class="form-control" readonly style="background:var(--bg-elevated)">
                     </div>
                 </div>
 
@@ -309,6 +356,21 @@ window.ModSubArr = (() => {
         overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
         document.getElementById('btn-guardar-sa').addEventListener('click', guardarNuevo);
 
+        const fechaInicioEl = document.getElementById('sa-fecha-inicio');
+        const diasEl = document.getElementById('sa-dias-renta');
+        const fechaDevEl = document.getElementById('sa-fecha-devolucion');
+        const recalcularDev = () => {
+            const f = fechaInicioEl.value;
+            const d = parseInt(diasEl.value, 10) || 0;
+            if (!f || d <= 0) { fechaDevEl.value = ''; return; }
+            const base = new Date(f + 'T12:00:00');
+            base.setDate(base.getDate() + d);
+            fechaDevEl.value = base.toISOString().slice(0, 10);
+        };
+        fechaInicioEl.addEventListener('change', recalcularDev);
+        diasEl.addEventListener('input', recalcularDev);
+        recalcularDev();
+
         // EVENTO: Cargar items automáticamente al elegir contrato
         document.getElementById('sa-contrato').addEventListener('change', e => {
             const contratoId = parseInt(e.target.value);
@@ -338,7 +400,8 @@ window.ModSubArr = (() => {
         const lista = document.getElementById('sa-items-lista');
         if (!lista) return;
         const idx = lista.querySelectorAll('.sa-item-row').length;
-        const productos = ModProductos ? ModProductos.getProductos() : [];
+        const ModP = window.ModProductos;
+        const productos = ModP ? ModP.getProductos() : [];
         const div = document.createElement('div');
         div.className = 'sa-item-row';
         div.dataset.idx = idx;
@@ -398,12 +461,16 @@ window.ModSubArr = (() => {
         const proveedor   = document.getElementById('sa-proveedor').value.trim();
         const contratoId  = parseInt(document.getElementById('sa-contrato').value);
         const fechaInicio = document.getElementById('sa-fecha-inicio').value;
+        const diasRenta   = parseInt(document.getElementById('sa-dias-renta').value, 10) || 0;
+        const fechaDevAuto = document.getElementById('sa-fecha-devolucion').value || null;
         const costoUnDia  = parseFloat(document.getElementById('sa-costo-dia').value) || 0;
         const notas       = document.getElementById('sa-notas').value.trim();
 
         if (!proveedor)  { App.toast('Ingresa el proveedor', 'danger'); return; }
-        if (!contratoId) { App.toast('Selecciona el contrato de destino', 'danger'); return; }
+        // Se quitó la restricción obligatoria del contrato de destino a petición del usuario
+        // if (!contratoId) { App.toast('Selecciona el contrato de destino', 'danger'); return; }
         if (!fechaInicio){ App.toast('Selecciona la fecha de inicio', 'danger'); return; }
+        if (diasRenta <= 0) { App.toast('Ingresa los días de renta', 'danger'); return; }
         if (costoUnDia <= 0) { App.toast('Ingresa el costo unitario por día', 'danger'); return; }
 
         // Recopilar items
@@ -424,7 +491,8 @@ window.ModSubArr = (() => {
 
         if (!items.length) { App.toast('Agrega al menos un producto con cantidad', 'danger'); return; }
 
-        const contratos = ModContratos ? ModContratos.getContratos() : [];
+        const ModC = window.ModContratos;
+        const contratos = ModC ? ModC.getContratos() : [];
         const contrato  = contratos.find(c => c.id === contratoId);
 
         const folioSA  = document.getElementById('sa-folio').value;
@@ -433,13 +501,13 @@ window.ModSubArr = (() => {
 
         // Crear el sub-arrendamiento
         const nuevaSA = {
-            id: Math.max(0, ...saData.map(s => s.id)) + 1,
             folio: folioSA,
             proveedor,
             contrato_destino_folio: contrato?.folio || '',
             razon_social_destino:   contrato?.razon_social || '',
             fecha_inicio:  fechaInicio,
-            fecha_devolucion: null,
+            dias_renta: diasRenta,
+            fecha_devolucion: fechaDevAuto,
             costo_unitario_dia: costoUnDia,
             estatus: 'activo',
             folio_he: folioHE,
@@ -448,11 +516,16 @@ window.ModSubArr = (() => {
             items,
         };
 
-        // Generar HE automática e inyectarla en ModHE
+        const resSA = await DB.insert('ops_subarriendos', nuevaSA);
+        if (resSA.error) {
+            App.toast('Error al guardar Sub-Arrendamiento: ' + resSA.error, 'danger');
+            return;
+        }
+
+        // Generar HE automática e inyectarla en la base de datos
         const nuevaHE = {
-            id: _nextIdHE(),
             folio: folioHE,
-            contrato_folio: contrato?.folio || '—',
+            contrato_folio: contrato?.folio || 'SARR-STOCK-INTERNO',
             razon_social: `[SUB-ARR] ${proveedor}`,
             fecha: fechaInicio,
             total_piezas: piezas,
@@ -467,29 +540,38 @@ window.ModSubArr = (() => {
             })),
         };
 
-        if (window.ModHE && ModHE.getHE) {
-            ModHE.getHE().push(nuevaHE);
+        const resHE = await DB.insert('ops_he', nuevaHE);
+        if (resHE?.error) {
+            console.error('Error al generar HE automática:', resHE.error);
+            App.toast(`Sub-Arr ${folioSA} guardado, pero NO se pudo generar HE (${folioHE}): ${resHE.error}`, 'warning');
+        } else {
+            // Forzar recarga de HE si el módulo está disponible (para que aparezca inmediatamente al navegar)
+            if (window.ModHE && typeof window.ModHE.reload === 'function') {
+                await window.ModHE.reload();
+            }
+        }
+
+        // Sincronizar localmente si los inserts fueron exitosos
+        if (resSA) saData.push(resSA);
+        if (resHE && window.ModHE && window.ModHE.getHE) {
+            window.ModHE.getHE().push(resHE);
         }
 
         // Actualizar inventario: sumar disponible por cada producto
-        items.forEach(it => {
-            if (window.ModInventario && ModInventario.actualizarStock) {
-                ModInventario.actualizarStock(it.producto_id, +it.cantidad);
-            }
-        });
-
-        saData.push(nuevaSA);
-        await DB.insert('ops_subarriendos', nuevaSA);
-        
-        // PERSISTENCIA: Guardar la HE automática en Supabase
-        const heRes = await DB.insert('ops_he', nuevaHE);
-        if (heRes && window.ModHE && ModHE.getHE) {
-            // Actualizar el registro local con el ID real si es necesario
-            nuevaHE.id = heRes.id;
-            ModHE.getHE().push(nuevaHE);
+        // (await para asegurar que se persista en inv_master antes de cerrar)
+        if (window.ModInventario && window.ModInventario.actualizarStock) {
+            await Promise.all(items.map(it =>
+                window.ModInventario.actualizarStock(it.producto_id, +it.cantidad)
+            ));
         }
+
         document.getElementById('modal-sa-nuevo').remove();
-        App.toast(`Sub-Arrendamiento ${folioSA} registrado — HE ${folioHE} generada`, 'success');
+        App.toast(
+            resHE?.error
+                ? `Sub-Arrendamiento ${folioSA} registrado (HE falló: ${folioHE}). Revisa permisos/tabla ops_he.`
+                : `Sub-Arrendamiento ${folioSA} registrado — HE ${folioHE} generada`,
+            resHE?.error ? 'warning' : 'success'
+        );
         renderKPIs();
         renderTabla();
     }
@@ -570,11 +652,10 @@ window.ModSubArr = (() => {
         const piezas  = totalPiezas(sa);
         const diasTot = calcDiasEntreFechas(sa.fecha_inicio, fechaDev);
 
-        // Generar HS automática e inyectarla en ModHS
+        // Generar HS automática e inyectarla en la base de datos
         const nuevaHS = {
-            id: _nextIdHS(),
             folio: folioHS,
-            contrato_folio: sa.contrato_destino_folio || '—',
+            contrato_folio: sa.contrato_destino_folio || 'SARR-STOCK-INTERNO',
             razon_social: `[DEVOL. SARR] ${sa.proveedor}`,
             fecha: fechaDev,
             total_piezas: piezas,
@@ -585,18 +666,14 @@ window.ModSubArr = (() => {
             items: sa.items.map(i => ({ ...i, cantidad_hs: i.cantidad })),
         };
 
-        if (window.ModHS && ModHS.getHS) {
-            ModHS.getHS().push(nuevaHS);
+        // Restar inventario disponible
+        if (window.ModInventario && window.ModInventario.actualizarStock) {
+            await Promise.all((sa.items || []).map(it =>
+                window.ModInventario.actualizarStock(it.producto_id, -it.cantidad)
+            ));
         }
 
-        // Restar inventario disponible
-        sa.items.forEach(it => {
-            if (window.ModInventario && ModInventario.actualizarStock) {
-                ModInventario.actualizarStock(it.producto_id, -it.cantidad);
-            }
-        });
-
-        // Actualizar el sub-arrendamiento
+        // Actualizar el sub-arrendamiento en la base de datos
         sa.estatus          = 'devuelto';
         sa.fecha_devolucion = fechaDev;
         sa.folio_hs         = folioHS;
@@ -609,9 +686,8 @@ window.ModSubArr = (() => {
 
         // PERSISTENCIA: Guardar la HS automática en Supabase
         const hsRes = await DB.insert('ops_hs', nuevaHS);
-        if (hsRes && window.ModHS && ModHS.getHS) {
-            nuevaHS.id = hsRes.id;
-            ModHS.getHS().push(nuevaHS);
+        if (hsRes && !hsRes.error && ModHS && ModHS.getHS) {
+            ModHS.getHS().push(hsRes);
         }
 
         document.getElementById('modal-sa-devolucion').remove();
@@ -771,52 +847,49 @@ window.ModSubArr = (() => {
     }
 
     function nextFolioHE() {
-        const heList = window.ModHE && ModHE.getHE ? ModHE.getHE() : [];
+        const heList = window.ModHE && window.ModHE.getHE ? window.ModHE.getHE() : [];
         const heNums = heList.map(h => parseInt((h.folio||'').replace(/\D/g,'')) || 0);
-        const num    = heNums.length ? Math.max(...heNums) + 1 : 10;
+        const num    = heNums.length ? Math.max(...heNums) + 1 : 101;
         return `HE-${String(num).padStart(3,'0')}`;
     }
 
     function nextFolioHS() {
-        const hsList = window.ModHS && ModHS.getHS ? ModHS.getHS() : [];
+        const hsList = window.ModHS && window.ModHS.getHS ? window.ModHS.getHS() : [];
         const hsNums = hsList.map(h => parseInt((h.folio||'').replace(/\D/g,'')) || 0);
-        const num    = hsNums.length ? Math.max(...hsNums) + 1 : 10;
+        const num    = hsNums.length ? Math.max(...hsNums) + 1 : 101;
         return `HS-${String(num).padStart(3,'0')}`;
     }
 
     function _nextIdHE() {
-        const heList = window.ModHE && ModHE.getHE ? ModHE.getHE() : [];
-        return heList.length ? Math.max(...heList.map(h => h.id)) + 1 : 100;
+        const heList = window.ModHE && window.ModHE.getHE ? window.ModHE.getHE() : [];
+        return heList.length ? Math.max(...heList.map(h => h.id || 0)) + 1 : 1001;
     }
 
     function _nextIdHS() {
-        const hsList = window.ModHS && ModHS.getHS ? ModHS.getHS() : [];
-        return hsList.length ? Math.max(...hsList.map(h => h.id)) + 1 : 100;
+        const hsList = window.ModHS && window.ModHS.getHS ? window.ModHS.getHS() : [];
+        return hsList.length ? Math.max(...hsList.map(h => h.id || 0)) + 1 : 1001;
     }
 
-    // ── Utilidades ────────────────────────────────────────────
-    function fmtFecha(f) {
-        if (!f) return '—';
-        return new Date(f + 'T12:00:00').toLocaleDateString('es-MX');
-    }
-    function hoyISO() { return new Date().toISOString().split('T')[0]; }
-    function truncar(str, n) {
-        if (!str) return '—';
-        return str.length > n ? str.slice(0, n) + '…' : str;
-    }
+    // Utility aliases — delegated to Utils
+    const fmtFecha = Utils.fmtFecha;
+    const hoyISO = Utils.hoyISO;
+    const truncar = Utils.truncar;
+
+    // Sub-arrendamiento-specific badge (different map than contracts)
     function badgeEstatus(e) {
         const map = {
             activo:    'badge-success',
             devuelto:  'badge-info',
             cancelado: 'badge-gray',
         };
-        return `<span class="badge ${map[e]||'badge-gray'}">${(e||'—').replace('_',' ')}</span>`;
+        return `<span class="badge ${map[e]||'badge-gray'}">${Utils.escapeHtml((e||'—').replace('_',' '))}</span>`;
     }
 
     return {
         render,
         verEstadoCuenta,
         abrirDevolucion,
+        abrirModalNuevo,
         getSA: () => saData,
         // Exponer helpers usados inline en el HTML
         _agregarItemRow,

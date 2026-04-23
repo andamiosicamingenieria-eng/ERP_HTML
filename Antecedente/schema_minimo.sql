@@ -22,6 +22,15 @@ CREATE TABLE IF NOT EXISTS crm_clientes (
     direccion        TEXT,
     limite_credito   DECIMAL(12,2) CHECK (limite_credito >= 0),
     saldo_actual     DECIMAL(12,2) DEFAULT 0 CHECK (saldo_actual >= 0),
+    -- Columnas adicionales para compatibilidad con importación CRM
+    sucursal         VARCHAR(100),
+    agente_ventas    VARCHAR(100),
+    fecha_nac        DATE,
+    telefono_oficina VARCHAR(20),
+    acceso           VARCHAR(100),
+    dias_credito     INTEGER,
+    medio_contacto   VARCHAR(100),
+    valido           VARCHAR(10),
     notas            TEXT,
     activo           BOOLEAN DEFAULT true,
     created_at       TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
@@ -99,8 +108,27 @@ CREATE TABLE IF NOT EXISTS ops_contratos (
     monto_total           DECIMAL(12,2) CHECK (monto_total >= 0),
     moneda                VARCHAR(3) DEFAULT 'MXN',
     estatus               VARCHAR(50) CHECK (estatus IN ('borrador','activo','entrega_parcial','recolectado','suspendido','terminado','cancelado')),
-    -- Ubicación como texto (no requiere PostGIS)
+    -- Datos adicionales del cliente desnormalizados
+    razon_social          VARCHAR(200),
+    rfc_cliente           VARCHAR(13),
+    telefono_cliente      VARCHAR(20),
+    direccion_cliente     TEXT,
+    -- Gestión de Cobranza
+    anticipo              DECIMAL(12,2) DEFAULT 0 CHECK (anticipo >= 0),
+    estatus_pago          VARCHAR(50) DEFAULT 'pendiente' CHECK (estatus_pago IN ('pendiente','parcial','liquidado')),
+    fecha_pago            DATE,
+    forma_pago            VARCHAR(50),
+    -- Operación y Logística
+    sistema               VARCHAR(100),
+    contacto_entrega      VARCHAR(100),
+    telefono_contacto_entrega VARCHAR(20),
+    direccion_entrega     TEXT,
     direccion_servicio    TEXT,
+    -- Cadena de folios
+    renta_anterior        VARCHAR(50),
+    renta_posterior       VARCHAR(50),
+    folio_raiz            VARCHAR(50),
+    -- Otros datos
     condiciones_pago      TEXT,
     clausulas             TEXT,
     archivo_contrato_url  VARCHAR(500),
@@ -109,10 +137,8 @@ CREATE TABLE IF NOT EXISTS ops_contratos (
     responsable_operativo VARCHAR(100),
     contrato_origen_folio VARCHAR(50),
     tipo_operacion        VARCHAR(50) CHECK (tipo_operacion IN ('nuevo','renovacion','extension','correccion')),
-    -- Items del contrato (guardados como JSONB para simplicidad)
     items                 JSONB,
     notas                 TEXT,
-    razon_social          VARCHAR(200),  -- Campo desnormalizado de clientes para lectura rápida
     created_at            TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at            TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT chk_contrato_fechas CHECK (fecha_fin IS NULL OR fecha_fin >= fecha_contrato),
@@ -120,11 +146,28 @@ CREATE TABLE IF NOT EXISTS ops_contratos (
 );
 CREATE INDEX IF NOT EXISTS idx_ops_contratos_cliente    ON ops_contratos(cliente_id);
 CREATE INDEX IF NOT EXISTS idx_ops_contratos_folio      ON ops_contratos(folio);
+CREATE INDEX IF NOT EXISTS idx_ops_contratos_folio_raiz ON ops_contratos(folio_raiz);
 CREATE INDEX IF NOT EXISTS idx_ops_contratos_estatus    ON ops_contratos(estatus);
 CREATE INDEX IF NOT EXISTS idx_ops_contratos_vencimiento ON ops_contratos(fecha_vencimiento);
 
 -- =====================================================================
--- 5. HOJAS DE ENTRADA (HE)
+-- 5. PAGOS (COBRANZA)
+-- =====================================================================
+CREATE TABLE IF NOT EXISTS ops_pagos (
+    id               SERIAL PRIMARY KEY,
+    contrato_id      INTEGER NOT NULL REFERENCES ops_contratos(id) ON DELETE CASCADE,
+    fecha_pago       DATE NOT NULL DEFAULT CURRENT_DATE,
+    monto            DECIMAL(12,2) NOT NULL CHECK (monto > 0),
+    metodo_pago      VARCHAR(50) CHECK (metodo_pago IN ('Transferencia','Efectivo','Cheque','Tarjeta','Otro')),
+    referencia       VARCHAR(100),
+    notas            TEXT,
+    created_at       TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at       TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_ops_pagos_contrato ON ops_pagos(contrato_id);
+
+-- =====================================================================
+-- 6. HOJAS DE ENTRADA (HE)
 -- =====================================================================
 CREATE TABLE IF NOT EXISTS ops_he (
     id                  SERIAL PRIMARY KEY,
@@ -148,7 +191,7 @@ CREATE INDEX IF NOT EXISTS idx_ops_he_folio    ON ops_he(folio);
 CREATE INDEX IF NOT EXISTS idx_ops_he_contrato ON ops_he(contrato_folio);
 
 -- =====================================================================
--- 6. HOJAS DE SALIDA (HS)
+-- 7. HOJAS DE SALIDA (HS)
 -- =====================================================================
 CREATE TABLE IF NOT EXISTS ops_hs (
     id             SERIAL PRIMARY KEY,
@@ -170,7 +213,7 @@ CREATE INDEX IF NOT EXISTS idx_ops_hs_folio    ON ops_hs(folio);
 CREATE INDEX IF NOT EXISTS idx_ops_hs_contrato ON ops_hs(contrato_folio);
 
 -- =====================================================================
--- 7. SUB-ARRENDAMIENTOS
+-- 8. SUB-ARRENDAMIENTOS
 -- =====================================================================
 CREATE TABLE IF NOT EXISTS ops_subarriendos (
     id                     SERIAL PRIMARY KEY,
@@ -206,7 +249,7 @@ DO $$
 DECLARE t text;
 BEGIN
   FOR t IN SELECT unnest(ARRAY[
-    'crm_clientes','cat_productos','inv_master','ops_contratos',
+    'crm_clientes','cat_productos','inv_master','ops_contratos','ops_pagos',
     'ops_he','ops_hs','ops_subarriendos'
   ]) LOOP
     EXECUTE format('
@@ -227,7 +270,7 @@ FROM information_schema.tables
 WHERE table_schema = 'public'
   AND table_name IN (
     'crm_clientes','cat_productos','inv_master',
-    'ops_contratos','ops_he','ops_hs','ops_subarriendos'
+    'ops_contratos','ops_pagos','ops_he','ops_hs','ops_subarriendos'
   )
 ORDER BY table_name;
--- Resultado esperado: 7 filas ✓
+-- Resultado esperado: 8 filas ✓

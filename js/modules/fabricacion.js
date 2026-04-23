@@ -1,9 +1,12 @@
+import { DB, DEMO_MODE } from '../supabase-client.js';
+import { Utils } from '../utils.js';
+
 /**
  * ICAM 360 - Módulo Fabricación
  * Rol: Clasificar piezas recolectadas (HE) y actualizar el inventario
  * "Vaciado de HE": limpio/sucio/chatarra
  */
-window.ModFabricacion = (() => {
+export const ModFabricacion = (() => {
 
     let selectedHEId = null;
 
@@ -220,7 +223,8 @@ window.ModFabricacion = (() => {
         render();
     }
 
-    function fmtFecha(f) { if (!f) return '—'; return new Date(f + 'T12:00:00').toLocaleDateString('es-MX'); }
+    // fmtFecha delegated to Utils
+    const fmtFecha = Utils.fmtFecha;
 
     return { render, procesarHE };
 })();

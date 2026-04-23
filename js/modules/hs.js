@@ -1,13 +1,24 @@
+import { DB, DEMO_MODE } from '../supabase-client.js';
+import { Utils } from '../utils.js';
+import { PDFGenerator } from './pdf-generator.js';
+import { ModContratos } from './contratos.js';
+
 /**
  * ICAM 360 - Módulo Hojas de Salida (ops_hs + ops_hs_items)
  * Los ítems se pre-cargan desde el contrato seleccionado
  */
-window.ModHS = (() => {
+export const ModHS = (() => {
     let hsData = [];
     let filtro = '';
+    let expandedId = null;
+    let solicitudesPendientes = [];
+    let pendientesEntrega = [];
+    let contratosModal = [];
 
     function render() {
         const mc = document.getElementById('module-content');
+        if (!mc) return;
+        
         mc.innerHTML = `
         <div class="page-toolbar">
             <div class="page-toolbar-left">
@@ -23,6 +34,49 @@ window.ModHS = (() => {
                 </button>
             </div>
         </div>
+
+        <div class="section-header mt-4">
+            <div class="section-title">📦 Solicitudes de Almacén (Pendientes de Salida)</div>
+        </div>
+        <div class="table-wrapper mb-4">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Fecha Prog.</th>
+                        <th>Contrato</th>
+                        <th>Cliente</th>
+                        <th>Contacto / Ubicación</th>
+                        <th>Ítems</th>
+                        <th>Acción</th>
+                    </tr>
+                </thead>
+                <tbody id="hs-solicitudes-tbody">
+                    <tr><td colspan="6"><div class="loading-center"><div class="spinner"></div></div></td></tr>
+                </tbody>
+            </table>
+        </div>
+
+        <div class="section-header mt-4">
+            <div class="section-title">📊 Seguimiento de Entregas por Contrato</div>
+        </div>
+        <div class="table-wrapper mb-4">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Contrato</th>
+                        <th>Cliente</th>
+                        <th>Entrega</th>
+                        <th>Pendiente</th>
+                        <th>Estatus</th>
+                        <th>Acción</th>
+                    </tr>
+                </thead>
+                <tbody id="hs-seg-tbody">
+                    <tr><td colspan="6"><div class="loading-center"><div class="spinner"></div></div></td></tr>
+                </tbody>
+            </table>
+        </div>
+
         <div class="table-wrapper">
             <table>
                 <thead>
@@ -48,36 +102,114 @@ window.ModHS = (() => {
     }
 
     async function cargarHS() {
-        const raw = await DB.getAll('ops_hs', { orderBy: 'folio', ascending: false });
-        hsData = raw || dataSeed();
-        renderTabla();
+        try {
+            const [raw, contratosRaw, solsRaw] = await Promise.all([
+                DB.getAll('ops_hs', { orderBy: 'folio', ascending: false }),
+                DB.getAll('ops_contratos', { orderBy: 'folio', ascending: false }),
+                DB.getAll('ops_solicitudes', { filter: { estatus: 'pendiente', tipo: 'entrega' } })
+            ]);
+            
+            hsData = raw || [];
+            solicitudesPendientes = solsRaw || [];
+            contratosModal = contratosRaw || [];
+            
+            const contratosConItems = (contratosRaw || []).map(c => ({
+                ...c,
+                items: (c.items && c.items.length)
+                    ? c.items
+                    : (ModContratos && typeof ModContratos.getItems === 'function' ? ModContratos.getItems(c.id) : [])
+            }));
+            
+            pendientesEntrega = construirPendientesEntrega(contratosConItems, hsData);
+            
+            renderSolicitudesPendientes();
+            renderSeguimientoPendientes();
+            renderTabla();
+        } catch (err) {
+            console.error('Error cargando HS:', err);
+        }
     }
 
-    function dataSeed() {
-        return [
-            { id: 1, folio: 'HS-001', contrato_folio: '20001', razon_social: 'CONSTRUCTORA TORRES DEL NORTE SA DE CV', fecha: '2026-03-15', total_piezas: 50, estatus: 'entregado', items: [{codigo:'AND-001',nombre:'Andamio Tubular 1.56x1.00m',cantidad:40,ya_entregado:0},{codigo:'TAB-001',nombre:'Tablón de Madera 3.00m',cantidad:30,ya_entregado:0}] },
-            { id: 2, folio: 'HS-002', contrato_folio: '20002', razon_social: 'EDIFICACIONES MONTERREY SA DE CV', fecha: '2026-03-28', total_piezas: 20, estatus: 'entregado', items: [{codigo:'AND-001',nombre:'Andamio Tubular 1.56x1.00m',cantidad:20,ya_entregado:0}] },
-        ];
+    function renderSolicitudesPendientes() {
+        const tbody = document.getElementById('hs-solicitudes-tbody');
+        if (!tbody) return;
+
+        if (solicitudesPendientes.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--text-muted);padding:1.5rem">No hay solicitudes de entrega pendientes</td></tr>';
+            return;
+        }
+
+        tbody.innerHTML = solicitudesPendientes.map(s => `
+            <tr>
+                <td class="font-bold">${Utils.formatDate(s.fecha_programada)}</td>
+                <td class="td-mono">${s.folio_contrato}</td>
+                <td><div class="font-bold">${contratosModal.find(c => c.id === s.contrato_id)?.razon_social || '—'}</div></td>
+                <td><div class="text-xs">${s.datos_entrega?.contacto || '—'}</div><div class="text-xs text-muted">${s.datos_entrega?.direccion || '—'}</div></td>
+                <td><span class="badge badge-info">${s.items?.length || 0} piezas</span></td>
+                <td>
+                    <div class="flex gap-2">
+                        <button class="btn btn-primary btn-sm" onclick="ModHS.procesarSolicitud(${s.id})">📦 Despachar</button>
+                        <button class="btn btn-secondary btn-sm" onclick="ModHS.imprimirSolicitud(${s.id})">📄 PDF</button>
+                    </div>
+                </td>
+            </tr>
+        `).join('');
+    }
+
+    function renderSeguimientoPendientes() {
+        const tbody = document.getElementById('hs-seg-tbody');
+        if (!tbody) return;
+
+        if (!pendientesEntrega.length) {
+            tbody.innerHTML = `<tr><td colspan="6"><div class="empty-state">
+                <h3>Sin contratos pendientes por entregar</h3>
+                <p>Todos los contratos abiertos con equipo ya tienen entrega total.</p>
+            </div></td></tr>`;
+            return;
+        }
+
+        tbody.innerHTML = pendientesEntrega.map(c => `
+            <tr>
+                <td class="td-mono">${c.folio || '—'}</td>
+                <td><strong style="color:var(--text-main)">${c.razon_social || '—'}</strong></td>
+                <td class="td-mono">${c.total_entregado}/${c.total_requerido} pzas</td>
+                <td class="td-mono" style="font-weight:700;color:var(--warning)">${c.total_pendiente} pzas</td>
+                <td>${badgeSeguimientoEntrega(c._estatusEntrega)}</td>
+                <td>
+                    <button class="btn btn-primary btn-sm btn-hs-desde-seg" data-id="${c.id}">+ Crear HS</button>
+                </td>
+            </tr>
+        `).join('');
+
+        document.querySelectorAll('.btn-hs-desde-seg').forEach(btn => {
+            btn.addEventListener('click', () => abrirModal(parseInt(btn.dataset.id)));
+        });
     }
 
     function renderTabla() {
         const tbody = document.getElementById('hs-tbody');
         if (!tbody) return;
+        
         const f = filtro.toLowerCase();
         const data = hsData.filter(h =>
             (h.folio||'').toLowerCase().includes(f) ||
             (h.contrato_folio||'').toLowerCase().includes(f) ||
             (h.razon_social||'').toLowerCase().includes(f)
         );
+        
         if (!data.length) {
             tbody.innerHTML = `<tr><td colspan="7"><div class="empty-state">
-                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="1" y="3" width="15" height="13"/><polygon points="16 8 20 8 23 11 23 16 16 16 16 8"/><circle cx="5.5" cy="18.5" r="2.5"/><circle cx="18.5" cy="18.5" r="2.5"/></svg>
                 <h3>Sin Hojas de Salida</h3><p>Crea la primera HS vinculada a un contrato.</p>
             </div></td></tr>`;
             return;
         }
-        tbody.innerHTML = data.map(h => `
-            <tr>
+        tbody.innerHTML = data.map(h => filaHS(h)).join('');
+    }
+
+    function filaHS(h) {
+        const isExpanded = expandedId === h.id;
+        const mainRow = `
+            <tr onclick="ModHS.toggleExp(${h.id})" class="${isExpanded ? 'row-expanded' : ''}" style="cursor:pointer">
                 <td class="td-mono">${h.folio}</td>
                 <td class="td-mono">${h.contrato_folio || '—'}</td>
                 <td><strong style="color:var(--text-main);font-size:0.8rem">${h.razon_social || '—'}</strong></td>
@@ -85,13 +217,63 @@ window.ModHS = (() => {
                 <td class="td-mono">${h.total_piezas || 0} pzas</td>
                 <td>${badgeEstatusHS(h.estatus)}</td>
                 <td>
-                    <button class="btn btn-secondary btn-sm" onclick="ModHS.verDetalle(${h.id})">Ver detalle</button>
+                    <div class="flex gap-1">
+                        <button class="btn btn-secondary btn-sm" onclick="event.stopPropagation(); ModHS.verDetalle(${h.id})">🔍</button>
+                    </div>
                 </td>
-            </tr>`).join('');
+            </tr>`;
+
+        if (!isExpanded) return mainRow;
+
+        const detailRow = `
+            <tr class="detail-row">
+                <td colspan="7">
+                    <div class="expand-detail-panel">
+                        <div class="expand-detail-title">📦 Despiece de la Hoja de Salida</div>
+                        <table class="items-table-mini">
+                            <thead>
+                                <tr>
+                                    <th>Código</th>
+                                    <th>Descripción</th>
+                                    <th>Cantidad</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                ${(h.items||[]).map(it => `
+                                    <tr>
+                                        <td class="td-mono">${it.codigo}</td>
+                                        <td>${it.nombre}</td>
+                                        <td class="td-mono">${it.cantidad_hs || it.cantidad}</td>
+                                    </tr>
+                                `).join('')}
+                            </tbody>
+                        </table>
+                        <div class="mt-3 flex justify-end">
+                            <button class="btn btn-secondary btn-sm" onclick="event.stopPropagation(); ModHS.verDetalle(${h.id})">Ver PDF / Más Detalles</button>
+                        </div>
+                    </div>
+                </td>
+            </tr>`;
+
+        return mainRow + detailRow;
     }
 
-    function abrirModal(contratoIdPresel = null) {
-        const contratos = ModContratos ? ModContratos.getContratos() : [];
+    function toggleExp(id) {
+        expandedId = expandedId === id ? null : id;
+        renderTabla();
+    }
+
+    async function abrirModal(contratoIdPresel = null, prefillData = null) {
+        const contratos = await obtenerContratosConItems();
+        contratosModal = contratos;
+        
+        const pendientes = construirPendientesEntrega(contratos, hsData);
+        const idsPendientes = new Set(pendientes.map(c => c.id));
+        const contratosParaSeleccion = contratoIdPresel
+            ? pendientes.concat(contratos.filter(c => c.id === contratoIdPresel && !idsPendientes.has(c.id)))
+            : pendientes;
+            
+        const folioSugerido = await nextFolioHS();
         const overlay = document.createElement('div');
         overlay.className = 'modal-overlay';
         overlay.id = 'modal-hs';
@@ -99,23 +281,24 @@ window.ModHS = (() => {
         <div class="modal modal-xl">
             <div class="modal-header">
                 <div>
-                    <div class="modal-title">Nueva Hoja de Salida (HS)</div>
+                    <div class="modal-title">Nueva Hoja de Salida (HS) ${prefillData ? '— Desde Solicitud' : ''}</div>
                     <div class="modal-subtitle">Los ítems se cargan automáticamente desde el contrato</div>
                 </div>
                 <button class="modal-close" onclick="document.getElementById('modal-hs').remove()">✕</button>
             </div>
             <div class="modal-body">
+                <input type="hidden" id="hs-solicitud-id" value="${prefillData?.solicitud_id || ''}">
                 <div class="form-row cols-3">
                     <div class="form-group">
                         <label class="form-label">Folio HS</label>
-                        <input id="hs-folio" class="form-control td-mono" value="${nextFolioHS()}" readonly style="background:var(--bg-elevated)">
+                        <input id="hs-folio" class="form-control td-mono" value="${folioSugerido}" readonly style="background:var(--bg-elevated)">
                     </div>
                     <div class="form-group">
                         <label class="form-label">Contrato <span class="required">*</span></label>
                         <select id="hs-contrato" class="form-control">
                             <option value="">— Selecciona contrato —</option>
-                            ${contratos.filter(c => ['activo','entrega_parcial','borrador'].includes(c.estatus)).map(c =>
-                                `<option value="${c.id}" ${contratoIdPresel===c.id?'selected':''}>${c.folio} — ${c.razon_social}</option>`
+                            ${contratosParaSeleccion.map(c =>
+                                `<option value="${c.id}" ${contratoIdPresel===c.id || prefillData?.contrato_id===c.id ?'selected':''}>${c.folio} — ${c.razon_social}</option>`
                             ).join('')}
                         </select>
                     </div>
@@ -150,7 +333,7 @@ window.ModHS = (() => {
 
                 <div class="form-group mt-4">
                     <label class="form-label">Notas</label>
-                    <textarea id="hs-notas" class="form-control" placeholder="Observaciones, condiciones de entrega…"></textarea>
+                    <textarea id="hs-notas" class="form-control" placeholder="Observaciones, condiciones de entrega…">${prefillData?.notas || ''}</textarea>
                 </div>
             </div>
             <div class="modal-footer">
@@ -163,46 +346,74 @@ window.ModHS = (() => {
 
         const selContrato = document.getElementById('hs-contrato');
         selContrato.addEventListener('change', () => cargarItemsContrato(selContrato.value));
-        if (contratoIdPresel) cargarItemsContrato(String(contratoIdPresel));
+        
+        if (contratoIdPresel || prefillData?.contrato_id) {
+            cargarItemsContrato(String(contratoIdPresel || prefillData.contrato_id), prefillData?.items);
+        }
+        
         document.getElementById('btn-guardar-hs').addEventListener('click', guardarHS);
     }
 
-    function cargarItemsContrato(contratoId) {
-        const items = ModContratos.getItems(parseInt(contratoId));
+    async function cargarItemsContrato(contratoId, itemsPrefill = null) {
+        if (!contratoId) return;
+        const contratoNum = parseInt(contratoId);
+        const c = contratosModal.find(x => x.id === contratoNum);
+        const items = (c?.items && c.items.length)
+            ? c.items
+            : (ModContratos && typeof ModContratos.getItems === 'function' ? ModContratos.getItems(contratoNum) : []);
+        
         const zona = document.getElementById('hs-items-zona');
         const tbody = document.getElementById('hs-items-tbody');
-        if (!items.length) { zona.style.display = 'none'; return; }
+        if (!items || !items.length) { zona.style.display = 'none'; return; }
         zona.style.display = 'block';
 
-        // Simular stock disponible del inventario
-        const inv = ModInventario ? ModInventario.getStock() : {};
+        const todasHS = hsData; // Local cache is usually enough or fetch if needed
+        const hsDelContrato = todasHS.filter(h => folioIgual(h.contrato_folio, c?.folio));
+        
+        const entregadoMap = {};
+        hsDelContrato.forEach(h => {
+            (h.items || []).forEach(it => {
+                entregadoMap[it.producto_id] = (entregadoMap[it.producto_id] || 0) + (it.cantidad_hs || it.cantidad || 0);
+            });
+        });
+
+        const inv = (typeof ModInventario !== 'undefined' && ModInventario.getStock) ? ModInventario.getStock() : {};
 
         tbody.innerHTML = items.map((it, i) => {
             const stock = inv[it.producto_id] || 999;
-            const pendiente = it.cantidad - (it.ya_entregado || 0);
+            const yaEntregado = entregadoMap[it.producto_id] || 0;
+            const pendiente = Math.max(0, it.cantidad - yaEntregado);
+            
+            let valSugerido = Math.min(pendiente, stock);
+            if (itemsPrefill) {
+                const pre = itemsPrefill.find(x => x.producto_id === it.producto_id);
+                if (pre) valSugerido = pre.cantidad;
+            }
+
             return `<tr>
                 <td class="td-mono">${it.codigo}</td>
                 <td>${it.nombre}</td>
                 <td class="td-mono">${it.cantidad}</td>
-                <td class="td-mono">${it.ya_entregado || 0}</td>
+                <td class="td-mono">${yaEntregado}</td>
                 <td class="td-mono" style="font-weight:700;color:${pendiente>0?'var(--warning)':'var(--success)'}">${pendiente}</td>
-                <td class="td-mono" style="color:${stock<pendiente?'var(--danger)':'var(--success)'}">
+                <td class="td-mono">
                     <span class="badge ${stock<pendiente?'badge-danger':'badge-success'}">${stock}</span>
                 </td>
                 <td>
                     <input type="number" class="form-control hs-cant-item" data-idx="${i}" data-max="${pendiente}" data-stock="${stock}"
-                        value="${pendiente}" min="0" max="${Math.min(pendiente, stock)}" style="width:80px;font-size:0.78rem"
-                        ${stock === 0 ? 'disabled style="background:var(--danger-light)"' : ''}>
+                        value="${valSugerido}" min="0" max="${Math.min(pendiente, stock)}" style="width:80px;font-size:0.78rem"
+                        ${(stock === 0 && valSugerido === 0) || (pendiente === 0 && valSugerido === 0) ? 'disabled style="background:var(--bg-alt)"' : ''}>
                 </td>
             </tr>`;
         }).join('');
 
+        // Listeners for stock validation
         document.querySelectorAll('.hs-cant-item').forEach(inp => {
             inp.addEventListener('input', () => {
                 const max = parseInt(inp.dataset.max);
                 const stock = parseInt(inp.dataset.stock);
                 const v = parseInt(inp.value) || 0;
-                if (v > stock) {
+                if (v > stock || v > max) {
                     inp.style.borderColor = 'var(--danger)';
                     inp.style.background = 'var(--danger-light)';
                 } else {
@@ -217,27 +428,27 @@ window.ModHS = (() => {
         const contratoId = parseInt(document.getElementById('hs-contrato').value);
         if (!contratoId) { App.toast('Selecciona un contrato', 'danger'); return; }
 
-        // Validar stock
-        let error = false;
+        let errorStock = false;
         document.querySelectorAll('.hs-cant-item').forEach(inp => {
-            if (parseInt(inp.value) > parseInt(inp.dataset.stock)) error = true;
+            if (parseInt(inp.value) > parseInt(inp.dataset.stock)) errorStock = true;
         });
-        if (error) { App.toast('Cantidad supera el stock disponible', 'danger'); return; }
+        if (errorStock) { App.toast('Cantidad supera el stock disponible', 'danger'); return; }
 
-        const contratos = ModContratos.getContratos();
-        const c = contratos.find(x => x.id === contratoId);
-
+        const c = contratosModal.find(x => x.id === contratoId);
         const items = [];
-        const contItems = ModContratos.getItems(contratoId);
+        const contItems = (c?.items && c.items.length) ? c.items : [];
+        
         document.querySelectorAll('.hs-cant-item').forEach((inp, i) => {
             const it = contItems[i];
-            if (it && parseInt(inp.value) > 0) {
-                items.push({ ...it, cantidad_hs: parseInt(inp.value) });
+            const val = parseInt(inp.value);
+            if (it && val > 0) {
+                items.push({ ...it, cantidad_hs: val });
             }
         });
 
+        if (items.length === 0) { App.toast('No hay piezas para entregar', 'warning'); return; }
+
         const nuevaHS = {
-            id: Math.max(0, ...hsData.map(h => h.id)) + 1,
             folio: document.getElementById('hs-folio').value,
             contrato_folio: c?.folio,
             razon_social: c?.razon_social,
@@ -245,19 +456,26 @@ window.ModHS = (() => {
             total_piezas: items.reduce((s, i) => s + i.cantidad_hs, 0),
             estatus: 'entregado',
             notas: document.getElementById('hs-notas').value,
-            items,
+            items: items
         };
 
-        hsData.push(nuevaHS);
-        await DB.insert('ops_hs', nuevaHS);
+        const res = await DB.insert('ops_hs', nuevaHS);
+        if (res.error) { App.toast('Error: ' + res.error, 'danger'); return; }
+
+        const solId = document.getElementById('hs-solicitud-id').value;
+        if (solId) {
+            await DB.update('ops_solicitudes', solId, { estatus: 'completada' });
+        }
+
         document.getElementById('modal-hs').remove();
         App.toast(`Hoja de Salida ${nuevaHS.folio} registrada`, 'success');
-        renderTabla();
+        cargarHS();
     }
 
     function verDetalle(hsId) {
         const h = hsData.find(x => x.id === hsId);
         if (!h) return;
+        
         const overlay = document.createElement('div');
         overlay.className = 'modal-overlay';
         overlay.id = 'modal-hs-detalle';
@@ -271,41 +489,103 @@ window.ModHS = (() => {
                 <button class="modal-close" onclick="document.getElementById('modal-hs-detalle').remove()">✕</button>
             </div>
             <div class="modal-body">
-                <div class="form-row cols-3" style="margin-bottom:1rem">
-                    <div><span class="stat-label">Fecha de Salida</span><div>${fmtFecha(h.fecha)}</div></div>
-                    <div><span class="stat-label">Total Piezas</span><div class="td-mono">${h.total_piezas} pzas</div></div>
+                <div class="form-row cols-3 mb-4">
+                    <div><span class="stat-label">Fecha</span><div>${fmtFecha(h.fecha)}</div></div>
+                    <div><span class="stat-label">Piezas</span><div class="td-mono">${h.total_piezas}</div></div>
                     <div><span class="stat-label">Estatus</span><div>${badgeEstatusHS(h.estatus)}</div></div>
                 </div>
                 <table class="items-table-mini">
-                    <thead><tr><th>Código</th><th>Descripción</th><th>Cantidad Entregada</th></tr></thead>
-                    <tbody>${(h.items||[]).map(i => `<tr>
-                        <td class="td-mono">${i.codigo}</td>
-                        <td>${i.nombre}</td>
-                        <td class="td-mono">${i.cantidad_hs || i.cantidad}</td>
-                    </tr>`).join('')}</tbody>
+                    <thead><tr><th>Código</th><th>Descripción</th><th>Cantidad</th></tr></thead>
+                    <tbody>${(h.items||[]).map(i => `<tr><td class="td-mono">${i.codigo}</td><td>${i.nombre}</td><td class="td-mono">${i.cantidad_hs || i.cantidad}</td></tr>`).join('')}</tbody>
                 </table>
-                ${h.notas ? `<div class="alert alert-info mt-4"><span>${h.notas}</span></div>` : ''}
             </div>
             <div class="modal-footer">
+                <button class="btn btn-secondary" id="btn-pdf-hs-ver">📄 Exportar PDF</button>
                 <button class="btn btn-secondary" onclick="document.getElementById('modal-hs-detalle').remove()">Cerrar</button>
             </div>
         </div>`;
         document.body.appendChild(overlay);
-        overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+        
+        document.getElementById('btn-pdf-hs-ver').addEventListener('click', () => {
+            if (PDFGenerator) PDFGenerator.generate('HS', h, h.items);
+            else App.toast('PDFGenerator no disponible', 'danger');
+        });
     }
 
-    function nextFolioHS() {
-        if (!hsData.length) return 'HS-003';
-        const nums = hsData.map(h => parseInt((h.folio||'').replace(/\D/g,'')) || 0);
-        return `HS-${String(Math.max(...nums) + 1).padStart(3,'0')}`;
+    async function obtenerContratosConItems() {
+        const contratosDB = (await DB.getAll('ops_contratos', { orderBy: 'folio', ascending: false })) || [];
+        return contratosDB;
     }
 
-    function fmtFecha(f) { if (!f) return '—'; return new Date(f + 'T12:00:00').toLocaleDateString('es-MX'); }
-    function hoyISO() { return new Date().toISOString().split('T')[0]; }
+    async function nextFolioHS() {
+        const rows = (await DB.getAll('ops_hs', { orderBy: 'folio', ascending: false })) || [];
+        let maxNum = 0;
+        rows.forEach(r => {
+            const m = String(r?.folio || '').trim().match(/^HS-(\d+)$/);
+            if (m) maxNum = Math.max(maxNum, parseInt(m[1], 10) || 0);
+        });
+        return `HS-${String(maxNum + 1).padStart(3,'0')}`;
+    }
+
+    function construirPendientesEntrega(contratos, todasHS) {
+        const abiertos = (contratos || []).filter(c => ['activo', 'entrega_parcial', 'borrador'].includes(c.estatus) && c.tipo_contrato === 'renta');
+        return abiertos.map(c => {
+            const avance = calcularAvanceEntrega(c, todasHS);
+            return { ...c, ...avance };
+        }).filter(c => c.total_pendiente > 0).sort((a,b) => (a.folio||'').localeCompare(b.folio||''));
+    }
+
+    function calcularAvanceEntrega(contrato, todasHS) {
+        const itemsReq = contrato.items || [];
+        const hsContrato = todasHS.filter(h => folioIgual(h.contrato_folio, contrato.folio));
+        const entregado = {};
+        hsContrato.forEach(h => {
+            (h.items || []).forEach(it => {
+                entregado[it.producto_id] = (entregado[it.producto_id] || 0) + (parseFloat(it.cantidad_hs || it.cantidad) || 0);
+            });
+        });
+        let totalReq = 0; let totalEnt = 0;
+        itemsReq.forEach(req => {
+            totalReq += parseFloat(req.cantidad) || 0;
+            totalEnt += Math.min(parseFloat(req.cantidad) || 0, entregado[req.producto_id] || 0);
+        });
+        const pendiente = Math.max(0, totalReq - totalEnt);
+        return { total_requerido: totalReq, total_entregado: totalEnt, total_pendiente: pendiente, _estatusEntrega: (totalEnt <= 0 ? 'sin_entrega' : 'parcial') };
+    }
+
+    async function procesarSolicitud(solId) {
+        const sol = solicitudesPendientes.find(x => x.id === solId);
+        if (!sol) return;
+        abrirModal(sol.contrato_id, {
+            items: sol.items,
+            solicitud_id: sol.id,
+            contrato_id: sol.contrato_id,
+            notas: `Despacho de solicitud programada para ${Utils.formatDate(sol.fecha_programada)}`
+        });
+    }
+
+    function imprimirSolicitud(solId) {
+        const sol = solicitudesPendientes.find(x => x.id === solId);
+        if (!sol) return;
+        const c = contratosModal.find(x => x.id === sol.contrato_id);
+        if (PDFGenerator) {
+            PDFGenerator.generate('SOLICITUD_ENTREGA', c || { folio: sol.folio_contrato }, sol.items);
+        }
+    }
+
+    // Helpers
+    const fmtFecha = Utils.fmtFecha;
+    const hoyISO = Utils.hoyISO;
+    const folioIgual = Utils.folioIgual;
+
     function badgeEstatusHS(e) {
         const map = { entregado:'badge-success', parcial:'badge-warning', pendiente:'badge-gray', venta_perdida:'badge-danger' };
-        return `<span class="badge ${map[e]||'badge-gray'}">${(e||'—').replace('_',' ')}</span>`;
+        return `<span class="badge ${map[e]||'badge-gray'}">${Utils.escapeHtml((e||'—').replace('_',' '))}</span>`;
+    }
+    function badgeSeguimientoEntrega(e) {
+        const map = { parcial: '<span class="badge badge-warning">🚛 Parcial</span>', sin_entrega: '<span class="badge badge-danger">🚛 Sin entrega</span>' };
+        return map[e] || '<span class="badge badge-gray">—</span>';
     }
 
-    return { render, abrirDesdeContrato: (id) => { abrirModal(id); }, getHS: () => hsData };
+    return { render, toggleExp, verDetalle, procesarSolicitud, imprimirSolicitud, abrirDesdeContrato: (id) => abrirModal(id) };
 })();

@@ -1,10 +1,19 @@
+import { DB, DEMO_MODE } from '../supabase-client.js';
+import { Utils } from '../utils.js';
+import { PDFGenerator } from './pdf-generator.js';
+import { ModContratos } from './contratos.js';
+
+
 /**
  * ICAM 360 - Módulo Hojas de Entrada (ops_he + ops_he_items)
  * Recolección de equipo — suma al inventario
  */
-window.ModHE = (() => {
+export const ModHE = (() => {
     let heData = [];
     let filtro = '';
+    let expandedId = null;
+    let solicitudesPendientes = []; let pendientesRecoleccion = [];
+    let contratosModal = [];
 
     function render() {
         const mc = document.getElementById('module-content');
@@ -22,6 +31,46 @@ window.ModHE = (() => {
                     Nueva Hoja de Entrada
                 </button>
             </div>
+        </div>
+        <div class="section-header mt-4">
+            <div class="section-title">📦 Solicitudes de Recolección (Pendientes de Entrada)</div>
+        </div>
+        <div class="table-wrapper mb-4">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Fecha Prog.</th>
+                        <th>Contrato</th>
+                        <th>Cliente</th>
+                        <th>Ubicación</th>
+                        <th>Ítems</th>
+                        <th>Acción</th>
+                    </tr>
+                </thead>
+                <tbody id="he-solicitudes-tbody">
+                    <tr><td colspan="6"><div class="loading-center"><div class="spinner"></div></div></td></tr>
+                </tbody>
+            </table>
+        </div>
+        <div class="section-header mt-4">
+            <div class="section-title">📊 Seguimiento de Recolecciones por Contrato</div>
+        </div>
+        <div class="table-wrapper mb-4">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Contrato</th>
+                        <th>Cliente</th>
+                        <th>Recolectado</th>
+                        <th>Pendiente</th>
+                        <th>Estatus</th>
+                        <th>Acción</th>
+                    </tr>
+                </thead>
+                <tbody id="he-seg-tbody">
+                    <tr><td colspan="6"><div class="loading-center"><div class="spinner"></div></div></td></tr>
+                </tbody>
+            </table>
         </div>
         <div class="table-wrapper">
             <table>
@@ -49,9 +98,122 @@ window.ModHE = (() => {
     }
 
     async function cargarHE() {
-        const raw = await DB.getAll('ops_he', { orderBy: 'folio', ascending: false });
-        heData = raw || dataSeed();
+        const [raw, contratosRaw, solsRaw] = await Promise.all([
+            DB.getAll('ops_he', { orderBy: 'folio', ascending: false }),
+            DB.getAll('ops_contratos', { orderBy: 'folio', ascending: false }),
+            DB.getAll('ops_solicitudes', { filter: { estatus: 'pendiente', tipo: 'recoleccion' } })
+        ]);
+        heData = raw || [];
+        solicitudesPendientes = solsRaw || [];
+        contratosModal = contratosRaw || [];
+        const contratosConItems = (contratosRaw || []).map(c => ({
+            ...c,
+            items: (c.items && c.items.length)
+                ? c.items
+                : (ModContratos && typeof ModContratos.getItems === 'function' ? ModContratos.getItems(c.id) : [])
+        }));
+        pendientesRecoleccion = construirPendientesRecoleccion(contratosConItems, heData);
+        renderSolicitudesPendientes();
+        renderSeguimientoPendientes();
         renderTabla();
+    }
+
+    function renderSolicitudesPendientes() {
+        const tbody = document.getElementById('he-solicitudes-tbody');
+        if (!tbody) return;
+
+        if (solicitudesPendientes.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--text-muted);padding:1.5rem">No hay solicitudes de recolección pendientes</td></tr>';
+            return;
+        }
+
+        tbody.innerHTML = solicitudesPendientes.map(s => `
+            <tr>
+                <td class="font-bold">${Utils.formatDate(s.fecha_programada)}</td>
+                <td class="td-mono">${s.folio_contrato}</td>
+                <td>${contratosModal.find(c => c.id === s.contrato_id)?.razon_social || '—'}</td>
+                <td><div class="text-xs">${s.datos_entrega?.contacto || '—'}</div><div class="text-xs text-muted">${s.datos_entrega?.direccion || '—'}</div></td>
+                <td><span class="badge badge-info">${s.items?.length || 0} piezas</span></td>
+                <td>
+                    <div class="flex gap-2">
+                        <button class="btn btn-primary btn-sm" onclick="ModHE.procesarSolicitud(${s.id})">📥 Recolectar</button>
+                        <button class="btn btn-secondary btn-sm" onclick="ModHE.imprimirSolicitud(${s.id})">📄 PDF</button>
+                    </div>
+                </td>
+            </tr>
+        `).join('');
+    }
+
+    function construirPendientesRecoleccion(contratos, todasHE) {
+        const abiertos = (contratos || []).filter(c =>
+            ['activo', 'entrega_parcial', 'borrador'].includes(c.estatus) &&
+            c.tipo_contrato === 'renta'
+        );
+
+        return abiertos
+            .map(c => {
+                const avance = calcularAvanceRecoleccion(c, todasHE || []);
+                return { ...c, ...avance };
+            })
+            .filter(c => c.total_requerido > 0 && c.total_recolectado < c.total_requerido)
+            .sort((a, b) => (a.folio || '').localeCompare(b.folio || '', 'es'));
+    }
+
+    function calcularAvanceRecoleccion(contrato, todasHE) {
+        const itemsReq = (contrato.items && contrato.items.length)
+            ? contrato.items
+            : (ModContratos && typeof ModContratos.getItems === 'function'
+                ? ModContratos.getItems(contrato.id)
+                : []);
+        const heContrato = (todasHE || []).filter(h => folioIgual(h.contrato_folio, contrato.folio));
+
+        const recolectado = {};
+        heContrato.forEach(h => {
+            (h.items || []).forEach(it => {
+                recolectado[it.producto_id] = (recolectado[it.producto_id] || 0) + (parseFloat(it.cantidad_recolectada || it.cantidad) || 0);
+            });
+        });
+
+        let totalReq = 0;
+        let totalRec = 0;
+        itemsReq.forEach(req => {
+            totalReq += parseFloat(req.cantidad) || 0;
+            totalRec += Math.min(parseFloat(req.cantidad) || 0, recolectado[req.producto_id] || 0);
+        });
+
+        const pendiente = Math.max(0, totalReq - totalRec);
+        const estatus = totalRec <= 0 ? 'sin_recoleccion' : 'parcial';
+        return { total_requerido: totalReq, total_recolectado: totalRec, total_pendiente: pendiente, _estatusRecoleccion: estatus };
+    }
+
+    function renderSeguimientoPendientes() {
+        const tbody = document.getElementById('he-seg-tbody');
+        if (!tbody) return;
+
+        if (!pendientesRecoleccion.length) {
+            tbody.innerHTML = `<tr><td colspan="6"><div class="empty-state">
+                <h3>Sin contratos pendientes por recolectar</h3>
+                <p>Todos los contratos abiertos con equipo ya tienen recolección total.</p>
+            </div></td></tr>`;
+            return;
+        }
+
+        tbody.innerHTML = pendientesRecoleccion.map(c => `
+            <tr>
+                <td class="td-mono">${c.folio || '—'}</td>
+                <td><strong style="color:var(--text-main)">${c.razon_social || '—'}</strong></td>
+                <td class="td-mono">${c.total_recolectado}/${c.total_requerido} pzas</td>
+                <td class="td-mono" style="font-weight:700;color:var(--warning)">${c.total_pendiente} pzas</td>
+                <td>${badgeSeguimientoRecoleccion(c._estatusRecoleccion)}</td>
+                <td>
+                    <button class="btn btn-primary btn-sm btn-he-desde-seg" data-id="${c.id}">+ Crear HE</button>
+                </td>
+            </tr>
+        `).join('');
+
+        document.querySelectorAll('.btn-he-desde-seg').forEach(btn => {
+            btn.addEventListener('click', () => abrirModal(parseInt(btn.dataset.id)));
+        });
     }
 
     function dataSeed() {
@@ -83,8 +245,13 @@ window.ModHE = (() => {
             </div></td></tr>`;
             return;
         }
-        tbody.innerHTML = data.map(h => `
-            <tr>
+        tbody.innerHTML = data.map(h => filaHE(h)).join('');
+    }
+
+    function filaHE(h) {
+        const isExpanded = expandedId === h.id;
+        const mainRow = `
+            <tr onclick="ModHE.toggleExp(${h.id})" class="${isExpanded ? 'row-expanded' : ''}" style="cursor:pointer">
                 <td class="td-mono">${h.folio}</td>
                 <td class="td-mono">${h.contrato_folio || '—'}</td>
                 <td><strong style="color:var(--text-main);font-size:0.8rem">${h.razon_social || '—'}</strong></td>
@@ -96,15 +263,64 @@ window.ModHE = (() => {
                     : '<span class="badge badge-warning">Pendiente</span>'}</td>
                 <td>
                     <div class="flex gap-2">
-                        <button class="btn btn-secondary btn-sm" onclick="ModHE.verDetalle(${h.id})">Ver</button>
-                        ${!h.vaciado_fabricacion ? `<button class="btn btn-primary btn-sm" onclick="ModHE.procesarVaciado(${h.id})">Procesar</button>` : ''}
+                        <button class="btn btn-secondary btn-sm" onclick="event.stopPropagation(); ModHE.verDetalle(${h.id})">🔍</button>
+                        ${!h.vaciado_fabricacion ? `<button class="btn btn-primary btn-sm" onclick="event.stopPropagation(); ModHE.procesarVaciado(${h.id})">⚙️</button>` : ''}
                     </div>
                 </td>
-            </tr>`).join('');
+            </tr>`;
+
+        if (!isExpanded) return mainRow;
+
+        const items = h.items || [];
+        const detailRow = `
+            <tr class="detail-row">
+                <td colspan="8">
+                    <div class="expand-detail-panel">
+                        <div class="expand-detail-title">📥 Detalle de Recolección</div>
+                        <table class="items-table-mini">
+                            <thead>
+                                <tr>
+                                    <th>Código</th>
+                                    <th>Descripción</th>
+                                    <th>Cant. Recolectada</th>
+                                    <th>Estado Reportado</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                ${items.map(it => `
+                                    <tr>
+                                        <td class="td-mono">${it.codigo}</td>
+                                        <td>${it.nombre}</td>
+                                        <td class="td-mono">${it.cantidad_recolectada || it.cantidad}</td>
+                                        <td><span class="badge badge-gray">${it.estado || 'Recibido'}</span></td>
+                                    </tr>
+                                `).join('')}
+                            </tbody>
+                        </table>
+                        <div class="mt-3 flex justify-end">
+                            <button class="btn btn-secondary btn-sm" onclick="event.stopPropagation(); ModHE.verDetalle(${h.id})">Ver PDF / Más Detalles</button>
+                        </div>
+                    </div>
+                </td>
+            </tr>`;
+
+        return mainRow + detailRow;
     }
 
-    function abrirModal(contratoIdPresel = null) {
-        const contratos = ModContratos ? ModContratos.getContratos() : [];
+    function toggleExp(id) {
+        expandedId = expandedId === id ? null : id;
+        renderTabla();
+    }
+
+    async function abrirModal(contratoIdPresel = null, prefillData = null) {
+        const contratos = await obtenerContratosConItems();
+        contratosModal = contratos;
+        const pendientes = construirPendientesRecoleccion(contratos, heData);
+        const idsPendientes = new Set(pendientes.map(c => c.id));
+        const contratosParaSeleccion = contratoIdPresel
+            ? pendientes.concat(contratos.filter(c => c.id === contratoIdPresel && !idsPendientes.has(c.id)))
+            : pendientes;
+        const folioSugerido = await nextFolioHE();
         const overlay = document.createElement('div');
         overlay.className = 'modal-overlay';
         overlay.id = 'modal-he';
@@ -112,23 +328,24 @@ window.ModHE = (() => {
         <div class="modal modal-xl">
             <div class="modal-header">
                 <div>
-                    <div class="modal-title">Nueva Hoja de Entrada (HE)</div>
+                    <div class="modal-title">Nueva Hoja de Entrada (HE) ${prefillData ? '— Desde Solicitud' : ''}</div>
                     <div class="modal-subtitle">Registro de recolección — el equipo regresa al almacén</div>
                 </div>
                 <button class="modal-close" onclick="document.getElementById('modal-he').remove()">✕</button>
             </div>
             <div class="modal-body">
+                <input type="hidden" id="he-solicitud-id" value="${prefillData?.solicitud_id || ''}">
                 <div class="form-row cols-3">
                     <div class="form-group">
                         <label class="form-label">Folio HE</label>
-                        <input id="he-folio" class="form-control td-mono" value="${nextFolioHE()}" readonly style="background:var(--bg-elevated)">
+                        <input id="he-folio" class="form-control td-mono" value="${folioSugerido}" readonly style="background:var(--bg-elevated)">
                     </div>
                     <div class="form-group">
                         <label class="form-label">Contrato <span class="required">*</span></label>
                         <select id="he-contrato" class="form-control">
                             <option value="">— Selecciona contrato —</option>
-                            ${contratos.filter(c => ['activo','entrega_parcial'].includes(c.estatus)).map(c =>
-                                `<option value="${c.id}" ${contratoIdPresel===c.id?'selected':''}>${c.folio} — ${c.razon_social}</option>`
+                            ${contratosParaSeleccion.map(c =>
+                                `<option value="${c.id}" ${contratoIdPresel===c.id || prefillData?.contrato_id===c.id ?'selected':''}>${c.folio} — ${c.razon_social}</option>`
                             ).join('')}
                         </select>
                     </div>
@@ -166,7 +383,7 @@ window.ModHE = (() => {
                     </div>
                     <div class="form-group">
                         <label class="form-label">Notas</label>
-                        <textarea id="he-notas" class="form-control" placeholder="Condiciones de entrega, observaciones…"></textarea>
+                        <textarea id="he-notas" class="form-control" placeholder="Condiciones de entrega, observaciones…">${prefillData?.notas || ''}</textarea>
                     </div>
                 </div>
             </div>
@@ -184,25 +401,66 @@ window.ModHE = (() => {
         document.getElementById('btn-guardar-he').addEventListener('click', guardarHE);
     }
 
-    function cargarItemsContratoHE(contratoId) {
-        const items = ModContratos.getItems(parseInt(contratoId));
+    async function obtenerContratosConItems() {
+        const contratosDB = (await DB.getAll('ops_contratos', { orderBy: 'folio', ascending: false })) || [];
+        return contratosDB.map(c => ({
+            ...c,
+            items: (c.items && c.items.length)
+                ? c.items
+                : (ModContratos && typeof ModContratos.getItems === 'function' ? ModContratos.getItems(c.id) : [])
+        }));
+    }
+
+    async function cargarItemsContratoHE(contratoId) {
+        const contratoNum = parseInt(contratoId);
+        const c = contratosModal.find(x => x.id === contratoNum);
+        const items = (c?.items && c.items.length)
+            ? c.items
+            : (ModContratos && typeof ModContratos.getItems === 'function' ? ModContratos.getItems(contratoNum) : []);
+
         const zona = document.getElementById('he-items-zona');
         const tbody = document.getElementById('he-items-tbody');
-        if (!items.length) { zona.style.display = 'none'; return; }
+        if (!items || !items.length) { zona.style.display = 'none'; return; }
         zona.style.display = 'block';
 
+        // Calcular cantidades en campo: (Suma de HS) - (Suma de HE previas)
+        const [todasHS, todasHE] = await Promise.all([
+            DB.getAll('ops_hs'),
+            DB.getAll('ops_he')
+        ]);
+
+        const hsDelContrato = (todasHS || []).filter(h => folioIgual(h.contrato_folio, c?.folio));
+        const heDelContrato = (todasHE || []).filter(h => folioIgual(h.contrato_folio, c?.folio));
+
+        const entregadoMap = {};
+        hsDelContrato.forEach(h => {
+            (h.items || []).forEach(it => {
+                entregadoMap[it.producto_id] = (entregadoMap[it.producto_id] || 0) + (it.cantidad_hs || it.cantidad || 0);
+            });
+        });
+
+        const recolectadoMap = {};
+        heDelContrato.forEach(h => {
+            (h.items || []).forEach(it => {
+                recolectadoMap[it.producto_id] = (recolectadoMap[it.producto_id] || 0) + (it.cantidad_recolectada || it.cantidad || 0);
+            });
+        });
+
         tbody.innerHTML = items.map((it, i) => {
-            const enCampo = it.cantidad - (it.ya_entregado || 0);
+            const totEntregado = entregadoMap[it.producto_id] || 0;
+            const totRecolectado = recolectadoMap[it.producto_id] || 0;
+            const enCampo = Math.max(0, totEntregado - totRecolectado);
+
             return `<tr>
                 <td class="td-mono">${it.codigo}</td>
                 <td>${it.nombre}</td>
-                <td class="td-mono" style="font-weight:700">${enCampo}</td>
+                <td class="td-mono" style="font-weight:700; color:${enCampo>0?'var(--primary)':'var(--text-muted)'}">${enCampo}</td>
                 <td>
                     <input type="number" class="form-control he-cant-item" data-idx="${i}" min="0" max="${enCampo}"
-                        value="${enCampo}" style="width:80px;font-size:0.78rem">
+                        value="${enCampo}" style="width:80px;font-size:0.78rem" ${enCampo === 0 ? 'disabled style="background:var(--bg-alt)"' : ''}>
                 </td>
                 <td>
-                    <select class="form-control he-estado-item" style="font-size:0.78rem">
+                    <select class="form-control he-estado-item" style="font-size:0.78rem" ${enCampo === 0 ? 'disabled' : ''}>
                         <option value="pendiente_clasificacion">⏳ Pendiente Clasificación</option>
                         <option value="limpio_funcional">✅ Limpio Funcional</option>
                         <option value="sucio_funcional">🔧 Sucio Funcional</option>
@@ -217,9 +475,10 @@ window.ModHE = (() => {
         const contratoId = parseInt(document.getElementById('he-contrato').value);
         if (!contratoId) { App.toast('Selecciona un contrato', 'danger'); return; }
 
-        const contratos = ModContratos.getContratos();
-        const c = contratos.find(x => x.id === contratoId);
-        const contItems = ModContratos.getItems(contratoId);
+        const c = contratosModal.find(x => x.id === contratoId);
+        const contItems = (c?.items && c.items.length)
+            ? c.items
+            : (ModContratos && typeof ModContratos.getItems === 'function' ? ModContratos.getItems(contratoId) : []);
 
         const items = [];
         document.querySelectorAll('.he-cant-item').forEach((inp, i) => {
@@ -235,7 +494,6 @@ window.ModHE = (() => {
         });
 
         const nuevaHE = {
-            id: Math.max(0, ...heData.map(h => h.id)) + 1,
             folio: document.getElementById('he-folio').value,
             contrato_folio: c?.folio,
             razon_social: c?.razon_social,
@@ -248,11 +506,22 @@ window.ModHE = (() => {
             items,
         };
 
-        heData.push(nuevaHE);
-        await DB.insert('ops_he', nuevaHE);
+        const res = await DB.insert('ops_he', nuevaHE);
+        if (res.error) {
+            App.toast('Error al guardar: ' + res.error, 'danger');
+            return;
+        }
+
+        // Marcar solicitud como completada si aplica
+        const solId = document.getElementById('he-solicitud-id').value;
+        if (solId) {
+            await DB.update('ops_solicitudes', solId, { estatus: 'completada' });
+        }
+
+        if (res) heData.push(res);
         document.getElementById('modal-he').remove();
         App.toast(`Hoja de Entrada ${nuevaHE.folio} registrada`, 'success');
-        renderTabla();
+        cargarHE(); // Recargar todo para actualizar paneles
     }
 
     function verDetalle(heId) {
@@ -288,12 +557,88 @@ window.ModHE = (() => {
                 ${h.notas ? `<div class="alert alert-info mt-4"><span>${h.notas}</span></div>` : ''}
             </div>
             <div class="modal-footer">
+                <button class="btn btn-secondary btn-pdf-he" data-id="${h.id}">📄 Generar PDF</button>
                 ${!h.vaciado_fabricacion ? `<button class="btn btn-primary" onclick="ModHE.procesarVaciado(${h.id});document.getElementById('modal-he-detalle').remove()">Procesar Vaciado</button>` : ''}
                 <button class="btn btn-secondary" onclick="document.getElementById('modal-he-detalle').remove()">Cerrar</button>
             </div>
         </div>`;
         document.body.appendChild(overlay);
+        
+        // Attach link to new PDF button
+        overlay.querySelector('.btn-pdf-he').addEventListener('click', (e) => {
+            e.stopPropagation();
+            generarPDF(h.id);
+        });
+
         overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+    }
+
+    async function generarPDF(heId) {
+        const h = heData.find(x => x.id === heId);
+        if (!h) return;
+
+        try {
+            App.toast('Generando Hoja de Entrada en PDF...', 'info');
+            
+            const url = 'Antecedente/hs_plantilla.pdf';
+            const templateBytes = await fetch(url).then(res => {
+                if(!res.ok) throw new Error('No se pudo cargar la hoja plantilla de entrada');
+                return res.arrayBuffer();
+            });
+
+            const { PDFDocument, rgb } = window.PDFLib;
+            const pdfDoc = await PDFDocument.load(templateBytes);
+            const page = pdfDoc.getPages()[0];
+            
+            const textColor = rgb(0.1, 0.1, 0.1); 
+            const font = await pdfDoc.embedFont(window.PDFLib.StandardFonts.Helvetica);
+            const fontBold = await pdfDoc.embedFont(window.PDFLib.StandardFonts.HelveticaBold);
+
+            const draw = (text, x, y, size = 10, isBold = false) => {
+                if(text == null || text === '') return;
+                page.drawText(String(text), { x, y, size, font: isBold ? fontBold : font, color: textColor });
+            };
+
+            // Coordenadas Estimadas para hoja de entrada (usando la plantilla hs_plantilla.pdf)
+            draw(h.folio || '0000', 480, 715, 12, true); // Folio HE
+            draw(fmtFecha(h.fecha), 460, 695, 10); // Fecha
+            draw(h.contrato_folio || '—', 460, 675, 10, true); // Folio contrato asociado
+            
+            draw(h.razon_social || '', 130, 660, 11, true); // Razón social
+            draw('Hoja de Entrada (Recolección)', 130, 640, 10);
+            
+            // Items
+            let startY = 520; 
+            const rowHeight = 16;
+            
+            (h.items || []).forEach((it, idx) => {
+                const currentY = startY - (idx * rowHeight);
+                draw(it.cantidad_recolectada || 0, 50, currentY, 10); // Cantidad recolectada en esta HE
+                draw(it.codigo || '', 100, currentY, 9); // Código
+                
+                const nombre = it.nombre || '';
+                draw(nombre.length > 50 ? nombre.substring(0, 50) + '…' : nombre, 160, currentY, 9); // Nombre
+            });
+
+            // Guardar y Descargar
+            const pdfBytes = await pdfDoc.save();
+            const blob = new Blob([pdfBytes], { type: 'application/pdf' });
+            const urlDescarga = window.URL.createObjectURL(blob);
+            
+            const link = document.createElement('a');
+            link.href = urlDescarga;
+            link.download = `HE_${h.folio || '000'}.pdf`;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            window.URL.revokeObjectURL(urlDescarga);
+
+            App.toast(`PDF de la HE ${h.folio} generado`, 'success');
+
+        } catch (err) {
+            console.error('Error generando PDF de HE:', err);
+            App.toast('Error generando el formato PDF: ' + err.message, 'danger');
+        }
     }
 
     function procesarVaciado(heId) {
@@ -304,27 +649,70 @@ window.ModHE = (() => {
         setTimeout(() => ModFabricacion && ModFabricacion.procesarHE(heId), 300);
     }
 
-    function nextFolioHE() {
-        if (!heData.length) return 'HE-002';
-        const nums = heData.map(h => parseInt((h.folio||'').replace(/\D/g,'')) || 0);
-        return `HE-${String(Math.max(...nums) + 1).padStart(3,'0')}`;
+    async function nextFolioHE() {
+        const rows = (await DB.getAll('ops_he', { orderBy: 'folio', ascending: false })) || [];
+        let maxNum = 0;
+        rows.forEach(r => {
+            const m = String(r?.folio || '').trim().match(/^HE-(\d+)$/);
+            if (m) maxNum = Math.max(maxNum, parseInt(m[1], 10) || 0);
+        });
+        return `HE-${String(maxNum + 1).padStart(3,'0')}`;
     }
 
-    function fmtFecha(f) { if (!f) return '—'; return new Date(f + 'T12:00:00').toLocaleDateString('es-MX'); }
-    function hoyISO() { return new Date().toISOString().split('T')[0]; }
+    // Utility aliases — delegated to Utils
+    const fmtFecha = Utils.fmtFecha;
+    const hoyISO = Utils.hoyISO;
+    const folioIgual = Utils.folioIgual;
+
+    // HE-specific badge functions (not in Utils)
     function badgeEstatusHE(e) {
         const map = { recibido:'badge-success', en_transito:'badge-warning', pendiente:'badge-gray' };
-        return `<span class="badge ${map[e]||'badge-gray'}">${(e||'—').replace('_',' ')}</span>`;
+        return `<span class="badge ${map[e]||'badge-gray'}">${Utils.escapeHtml((e||'—').replace('_',' '))}</span>`;
     }
     function badgeEstadoPieza(e) {
         const map = { pendiente_clasificacion:'badge-warning', limpio_funcional:'badge-success', sucio_funcional:'badge-info', chatarra:'badge-danger' };
-        return `<span class="badge ${map[e]||'badge-gray'}">${(e||'—').replace(/_/g,' ')}</span>`;
+        return `<span class="badge ${map[e]||'badge-gray'}">${Utils.escapeHtml((e||'—').replace(/_/g,' '))}</span>`;
+    }
+    function badgeSeguimientoRecoleccion(e) {
+        const map = {
+            parcial: '<span class="badge badge-warning">📥 Parcial</span>',
+            sin_recoleccion: '<span class="badge badge-danger">📥 Sin recolección</span>'
+        };
+        return map[e] || '<span class="badge badge-gray">—</span>';
     }
 
-    return {
-        render,
-        abrirDesdeContrato: (id) => abrirModal(id),
-        procesarVaciado,
-        getHE: () => heData,
+    async function procesarSolicitud(solId) {
+        const sol = solicitudesPendientes.find(x => x.id === solId);
+        if (!sol) return;
+        
+        // Abrir modal de HE con los datos de la solicitud
+        abrirModal(sol.contrato_id, {
+            items: sol.items,
+            solicitud_id: sol.id,
+            notas: `Recolección de solicitud programada para ${Utils.formatDate(sol.fecha_programada)}`
+        });
+    }
+
+    function imprimirSolicitud(solId) {
+        const sol = solicitudesPendientes.find(x => x.id === solId);
+        if (!sol) return;
+        const c = contratosModal.find(x => x.id === sol.contrato_id);
+        if (PDFGenerator) {
+            PDFGenerator.generate('SOLICITUD_RECOLECCION', c || { folio: sol.folio_contrato }, sol.items);
+        }
+    }
+
+    // API Pública
+    return { 
+        render, 
+        verDetalle, 
+        getHE: () => heData, 
+        reload: async () => {
+            await cargarHE();
+        },
+        toggleExp,
+        abrirDesdeContrato: (id) => { abrirModal(id); },
+        procesarSolicitud,
+        imprimirSolicitud
     };
 })();
