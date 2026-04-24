@@ -58,14 +58,16 @@ export const Auth = (() => {
             const ok =
                 (u === 'admin@icam360.com' && password === 'demo123') ||
                 (u === 'contratos@icam360.com' && password === 'demo123') ||
-                (u === 'inventarios@icam360.com' && password === 'demo123');
+                (u === 'inventarios@icam360.com' && password === 'demo123') ||
+                (u === 'facturacion@andamiosicam.com' && password === 'contratos26*') ||
+                (u === 'andamiosicaminventarios@gmail.com' && password === 'Exigenciadiaria2026');
             if (!ok) return { error: 'Credenciales inválidas en demo.' };
 
             // Usuario “simulado” para que la UI pueda aplicar permisos por rol
             currentUser = {
                 id: 'demo-user',
                 email: u,
-                app_metadata: { role: u === 'admin@icam360.com' ? 'admin' : (u === 'contratos@icam360.com' ? 'contratos' : 'inventarios') },
+                app_metadata: { role: u === 'admin@icam360.com' ? 'admin' : (u === 'contratos@icam360.com' ? 'contratos' : (u === 'facturacion@andamiosicam.com' ? 'revisor' : 'inventarios')) },
                 user_metadata: {},
             };
             return currentUser;

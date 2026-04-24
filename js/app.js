@@ -38,13 +38,15 @@ const MODULES = {
 // complementa con RLS/políticas en Supabase por rol.
 const ROLE_LABEL = {
     admin: 'Administrador',
-    contratos: 'Revisor de Contratos',
+    contratos: 'Contratos',
+    revisor: 'Revisor de Contratos',
     inventarios: 'Inventarios',
 };
 
 const ROLE_MODULES = {
     admin: null, // null = todos los módulos definidos en MODULES
     contratos: new Set(['clientes', 'productos', 'contratos', 'seguimiento', 'pagos', 'estado_cuenta']),
+    revisor: new Set(['clientes', 'productos', 'contratos', 'seguimiento', 'pagos', 'estado_cuenta']),
     inventarios: new Set(['productos', 'subarr', 'hs', 'he', 'inventario', 'fabricacion']),
 };
 
