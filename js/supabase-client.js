@@ -48,13 +48,47 @@ export const DB = {
         if (cache[table] && !opts.forceReload && !opts.limit && !opts.offset) {
             return cache[table];
         }
+        
+        // Limpiar caché si se fuerza recarga
+        if (opts.forceReload && cache[table]) {
+            cache[table] = null;
+        }
 
         try {
             const selectStr = opts.select || '*';
             let q = _supabase.from(table).select(selectStr);
             if (opts.orderBy) q = opts.ascending === false ? q.order(opts.orderBy, { ascending: false }) : q.order(opts.orderBy);
+            
+            // Manejar tablas grandes con paginación
+            let allData = [];
+            let page = 0;
+            const pageSize = 1000;
+            
+            if (!opts.limit && !opts.offset) {
+                // Paginación automática para tablas grandes
+                while (true) {
+                    const offset = page * pageSize;
+                    let pagedQ = _supabase.from(table).select(selectStr);
+                    if (opts.orderBy) pagedQ = opts.ascending === false ? pagedQ.order(opts.orderBy, { ascending: false }) : pagedQ.order(opts.orderBy);
+                    pagedQ = pagedQ.range(offset, offset + pageSize - 1);
+                    
+                    const { data, error } = await pagedQ;
+                    if (error) throw error;
+                    
+                    if (data && data.length > 0) {
+                        allData = allData.concat(data);
+                        if (data.length < pageSize) break; // Última página
+                        page++;
+                    } else {
+                        break;
+                    }
+                }
+                return allData;
+            }
+            
+            // Comportamiento original para consultas con límite
             if (opts.limit) q = q.limit(opts.limit);
-            if (opts.offset) q = q.range(opts.offset, opts.offset + (opts.limit || 50) - 1);
+            if (opts.offset) q = q.range(opts.offset, opts.offset + (opts.limit || 1000) - 1);
             const { data, error, status } = await q;
             
             if (error) { 
@@ -72,9 +106,9 @@ export const DB = {
             
             // Guardar en caché si son tablas catálogo y la consulta no está filtrada/paginada
             if ((table === 'crm_clientes' || table === 'cat_productos') && !opts.limit && !opts.offset) {
-                cache[table] = data;
+                cache[table] = allData || data;
             }
-            return data;
+            return allData || data;
         } catch (e) { 
             console.error('[DB FATAL]', e); 
             if (window.App && App.toast) App.toast('Error de conexión con la base de datos', 'danger');

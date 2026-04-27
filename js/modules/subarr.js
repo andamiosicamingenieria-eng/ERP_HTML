@@ -522,6 +522,9 @@ export const ModSubArr = (() => {
             return;
         }
 
+        // NOTA: La HE se crea automáticamente por trigger en Supabase (trg_subarr_crear_he)
+        // Si el trigger está deshabilitado, descomenta el código de abajo:
+        /*
         // Generar HE automática e inyectarla en la base de datos
         const nuevaHE = {
             folio: folioHE,
@@ -530,7 +533,7 @@ export const ModSubArr = (() => {
             fecha: fechaInicio,
             total_piezas: piezas,
             estatus: 'recibido',
-            vaciado_fabricacion: true, // No requiere clasificación en taller
+            vaciado_fabricacion: true,
             tipo: 'subarr',
             referencia_sa: folioSA,
             items: items.map(i => ({
@@ -545,17 +548,18 @@ export const ModSubArr = (() => {
             console.error('Error al generar HE automática:', resHE.error);
             App.toast(`Sub-Arr ${folioSA} guardado, pero NO se pudo generar HE (${folioHE}): ${resHE.error}`, 'warning');
         } else {
-            // Forzar recarga de HE si el módulo está disponible (para que aparezca inmediatamente al navegar)
             if (window.ModHE && typeof window.ModHE.reload === 'function') {
                 await window.ModHE.reload();
             }
         }
 
-        // Sincronizar localmente si los inserts fueron exitosos
-        if (resSA) saData.push(resSA);
         if (resHE && window.ModHE && window.ModHE.getHE) {
             window.ModHE.getHE().push(resHE);
         }
+        */
+
+        // Sincronizar localmente
+        if (resSA) saData.push(resSA);
 
         // Actualizar inventario: sumar disponible por cada producto
         // (await para asegurar que se persista en inv_master antes de cerrar)
@@ -566,12 +570,7 @@ export const ModSubArr = (() => {
         }
 
         document.getElementById('modal-sa-nuevo').remove();
-        App.toast(
-            resHE?.error
-                ? `Sub-Arrendamiento ${folioSA} registrado (HE falló: ${folioHE}). Revisa permisos/tabla ops_he.`
-                : `Sub-Arrendamiento ${folioSA} registrado — HE ${folioHE} generada`,
-            resHE?.error ? 'warning' : 'success'
-        );
+        App.toast(`Sub-Arrendamiento ${folioSA} registrado — HE se generará automáticamente`, 'success');
         renderKPIs();
         renderTabla();
     }
@@ -847,17 +846,25 @@ export const ModSubArr = (() => {
     }
 
     function nextFolioHE() {
+        // Usar el mismo formato secuencial que he.js para mantener consecutivos
         const heList = window.ModHE && window.ModHE.getHE ? window.ModHE.getHE() : [];
-        const heNums = heList.map(h => parseInt((h.folio||'').replace(/\D/g,'')) || 0);
-        const num    = heNums.length ? Math.max(...heNums) + 1 : 101;
-        return `HE-${String(num).padStart(3,'0')}`;
+        let maxNum = 0;
+        heList.forEach(h => {
+            const m = String(h?.folio || '').trim().match(/^HE-(\d+)$/);
+            if (m) maxNum = Math.max(maxNum, parseInt(m[1], 10) || 0);
+        });
+        return `HE-${String(maxNum + 1).padStart(3,'0')}`;
     }
 
     function nextFolioHS() {
+        // Usar el mismo formato secuencial que hs.js para mantener consecutivos
         const hsList = window.ModHS && window.ModHS.getHS ? window.ModHS.getHS() : [];
-        const hsNums = hsList.map(h => parseInt((h.folio||'').replace(/\D/g,'')) || 0);
-        const num    = hsNums.length ? Math.max(...hsNums) + 1 : 101;
-        return `HS-${String(num).padStart(3,'0')}`;
+        let maxNum = 0;
+        hsList.forEach(h => {
+            const m = String(h?.folio || '').trim().match(/^HS-(\d+)$/);
+            if (m) maxNum = Math.max(maxNum, parseInt(m[1], 10) || 0);
+        });
+        return `HS-${String(maxNum + 1).padStart(3,'0')}`;
     }
 
     function _nextIdHE() {

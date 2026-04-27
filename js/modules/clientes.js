@@ -22,6 +22,9 @@ export const ModClientes = (() => {
                     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
                     <input id="clientes-search" type="text" placeholder="Buscar por razón social o RFC…" value="${filtro}">
                 </div>
+                <button class="btn btn-secondary btn-sm" onclick="ModClientes.recargar()" title="Recargar datos">
+                    🔄
+                </button>
             </div>
             <div class="page-toolbar-right">
                 <button class="btn btn-primary" id="btn-nuevo-cliente">
@@ -64,6 +67,15 @@ export const ModClientes = (() => {
         const raw = await DB.getAll('crm_clientes', { orderBy: 'razon_social' });
         clientes = raw || dataSeed();
         renderTabla();
+    }
+
+    // Recargar datos desde Supabase (forzar recarga sin caché)
+    async function recargar() {
+        App.toast('Recargando clientes...', 'info');
+        const raw = await DB.getAll('crm_clientes', { orderBy: 'razon_social', forceReload: true });
+        clientes = raw || dataSeed();
+        renderTabla();
+        App.toast(`Cargados ${clientes.length} clientes`, 'success');
     }
 
     function dataSeed() {
@@ -256,6 +268,7 @@ export const ModClientes = (() => {
         render, 
         editar: abrirModal, 
         getClientes: () => clientes,
-        cargar: cargarClientes 
+        cargar: cargarClientes,
+        recargar 
     };
 })();

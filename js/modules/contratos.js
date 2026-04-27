@@ -328,10 +328,14 @@ export const ModContratos = (() => {
                 <div class="form-row cols-2">
                     <div class="form-group">
                         <label class="form-label">Cliente <span class="required">*</span></label>
-                        <select id="c-cliente" class="form-control">
+                        <input type="text" id="c-cliente-buscar" class="form-control" placeholder="Buscar por nombre o RFC..." oninput="ModContratos.filtrarClientes(this.value)">
+                        <select id="c-cliente" class="form-control" style="margin-top:0.5rem" onchange="ModContratos.seleccionarCliente(this.value)">
                             <option value="">— Selecciona cliente —</option>
-                            ${clientes.map(cl => `<option value="${cl.id}" ${c?.cliente_id===cl.id?'selected':''}>${cl.razon_social}</option>`).join('')}
+                            ${clientes.map(cl => `<option value="${cl.id}" data-rfc="${cl.rfc||''}" data-nombre="${cl.razon_social||''}" ${c?.cliente_id===cl.id?'selected':''}>${cl.razon_social} (${cl.rfc||'Sin RFC'})</option>`).join('')}
                         </select>
+                        <div id="c-cliente-seleccionado" style="font-size:0.8rem;color:var(--primary);margin-top:0.25rem;display:${c?.cliente_id?'block':'none'}">
+                            ✓ ${c?.cliente_id ? clientes.find(cl=>cl.id===c?.cliente_id)?.razon_social : ''}
+                        </div>
                     </div>
                     <div class="form-group">
                         <label class="form-label">Agente de Ventas</label>
@@ -1043,6 +1047,57 @@ export const ModContratos = (() => {
         return `${prefijo}-${String(maxNum + 1).padStart(3, '0')}`;
     }
 
+    // Filtrar clientes en el select por nombre o RFC
+    function filtrarClientes(texto) {
+        const select = document.getElementById('c-cliente');
+        const buscar = texto.toLowerCase().trim();
+        let opciones = select.options;
+        let encontrados = 0;
+        
+        for (let i = 1; i < opciones.length; i++) {
+            const opt = opciones[i];
+            const nombre = (opt.getAttribute('data-nombre') || '').toLowerCase();
+            const rfc = (opt.getAttribute('data-rfc') || '').toLowerCase();
+            const coincide = buscar === '' || nombre.includes(buscar) || rfc.includes(buscar);
+            opt.style.display = coincide ? '' : 'none';
+            if (coincide) encontrados++;
+        }
+        
+        // Mostrar mensaje si no hay resultados
+        let msg = document.getElementById('cliente-buscar-mensaje');
+        if (encontrados === 0 && buscar !== '') {
+            if (!msg) {
+                msg = document.createElement('div');
+                msg.id = 'cliente-buscar-mensaje';
+                msg.style.cssText = 'color:var(--danger);font-size:0.8rem;margin-top:0.25rem';
+                select.parentNode.appendChild(msg);
+            }
+            msg.textContent = `No se encontraron clientes con "${texto}"`;
+            msg.style.display = 'block';
+        } else if (msg) {
+            msg.style.display = 'none';
+        }
+    }
+
+    // Seleccionar cliente del dropdown filtrado
+    function seleccionarCliente(id) {
+        const select = document.getElementById('c-cliente');
+        const msg = document.getElementById('cliente-buscar-mensaje');
+        const info = document.getElementById('c-cliente-seleccionado');
+        
+        if (id) {
+            const opt = select.options[select.selectedIndex];
+            const nombre = opt.getAttribute('data-nombre') || '';
+            if (info) {
+                info.textContent = '✓ ' + nombre;
+                info.style.display = 'block';
+            }
+            if (msg) msg.style.display = 'none';
+        } else {
+            if (info) info.style.display = 'none';
+        }
+    }
+
     return { 
         render, 
         getContratos: () => contratos, 
@@ -1050,6 +1105,8 @@ export const ModContratos = (() => {
         generarPDF, 
         prepararVentaPorPerdidaDesdeSeguimiento,
         crearSolicitud,
-        cargar: cargarContratos
+        cargar: cargarContratos,
+        filtrarClientes,
+        seleccionarCliente
     };
 })();
