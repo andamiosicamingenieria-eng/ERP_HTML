@@ -377,10 +377,14 @@ export const ModHS = (() => {
             });
         });
 
-        const inv = (typeof ModInventario !== 'undefined' && ModInventario.getStock) ? ModInventario.getStock() : {};
+        const inv = (typeof ModInventario !== 'undefined' && ModInventario.loadStock)
+            ? await ModInventario.loadStock()
+            : (typeof ModInventario !== 'undefined' && ModInventario.getStock)
+                ? ModInventario.getStock()
+                : {};
 
         tbody.innerHTML = items.map((it, i) => {
-            const stock = inv[it.producto_id] || 999;
+            const stock = Number(inv[it.producto_id] ?? 0);
             const yaEntregado = entregadoMap[it.producto_id] || 0;
             const pendiente = Math.max(0, it.cantidad - yaEntregado);
             

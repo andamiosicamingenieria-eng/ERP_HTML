@@ -8,6 +8,7 @@ import { Utils } from '../utils.js';
 export const ModInventario = (() => {
     let inventario = [];
     let filtro = '';
+    let stockLoaded = false;
 
     function render() {
         const mc = document.getElementById('module-content');
@@ -89,7 +90,7 @@ export const ModInventario = (() => {
         cargarInventario();
     }
 
-    async function cargarInventario() {
+    async function cargarInventario(renderUi = true) {
         const [prods, inv] = await Promise.all([
             DB.getAll('cat_productos', { select: 'id,codigo,nombre', orderBy: 'id' }),
             DB.getAll('inv_master', {
@@ -117,9 +118,11 @@ export const ModInventario = (() => {
                 };
             });
         }
-        
-        renderKPIs();
-        renderTabla();
+        stockLoaded = true;
+        if (renderUi) {
+            renderKPIs();
+            renderTabla();
+        }
     }
 
     function dataSeed() {
@@ -390,9 +393,17 @@ export const ModInventario = (() => {
         return map;
     }
 
+    async function loadStock() {
+        if (!stockLoaded) {
+            await cargarInventario(false);
+        }
+        return getStock();
+    }
+
     return { 
         render, 
-        getStock, 
+        getStock,
+        loadStock,
         verDetalle, 
         actualizarStock: async (productoId, delta) => {
             const i = inventario.find(x => x.producto_id === productoId);
