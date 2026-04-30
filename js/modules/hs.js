@@ -2,6 +2,8 @@ import { DB, DEMO_MODE } from '../supabase-client.js';
 import { Utils } from '../utils.js';
 import { PDFGenerator } from './pdf-generator.js';
 import { ModContratos } from './contratos.js';
+import { ModInventario } from './inventario.js';
+import { ModProductos } from './productos.js';
 
 /**
  * ICAM 360 - Módulo Hojas de Salida (ops_hs + ops_hs_items)
@@ -103,13 +105,41 @@ export const ModHS = (() => {
 
     async function cargarHS() {
         try {
-            const [raw, contratosRaw, solsRaw] = await Promise.all([
+            // Cargar productos para enriquecer items con nombre
+            if (ModProductos && ModProductos.getProductos().length === 0) {
+                await ModProductos.cargar();
+            }
+            const prods = ModProductos ? ModProductos.getProductos() : [];
+
+            const [raw, hsItemsRaw, contratosRaw, solsRaw] = await Promise.all([
                 DB.getAll('ops_hs', { orderBy: 'folio', ascending: false }),
+                DB.getAll('ops_hs_items'),
                 DB.getAll('ops_contratos', { orderBy: 'folio', ascending: false }),
                 DB.getAll('ops_solicitudes', { filter: { estatus: 'pendiente', tipo: 'entrega' } })
             ]);
-            
-            hsData = raw || [];
+
+            // Agrupar items de ops_hs_items por hs_id y enriquecer con codigo/nombre
+            const hsItemsMap = {};
+            (hsItemsRaw || []).forEach(it => {
+                if (!hsItemsMap[it.hs_id]) hsItemsMap[it.hs_id] = [];
+                const prod = prods.find(p => p.codigo === it.producto_id) || {};
+                hsItemsMap[it.hs_id].push({
+                    ...it,
+                    codigo: it.producto_id,          // producto_id ya es el código string
+                    nombre: prod.nombre || it.producto_id,
+                });
+            });
+
+            hsData = (raw || []).map(h => {
+                const items = hsItemsMap[h.id] || h.items || [];
+                return {
+                    ...h,
+                    items,
+                    // Recalcular total_piezas desde items si no está guardado
+                    total_piezas: h.total_piezas || items.reduce((s, it) => s + (parseFloat(it.cantidad_hs) || 0), 0)
+                };
+            });
+
             solicitudesPendientes = solsRaw || [];
             contratosModal = contratosRaw || [];
             
@@ -373,19 +403,20 @@ export const ModHS = (() => {
         const entregadoMap = {};
         hsDelContrato.forEach(h => {
             (h.items || []).forEach(it => {
-                entregadoMap[it.producto_id] = (entregadoMap[it.producto_id] || 0) + (it.cantidad_hs || it.cantidad || 0);
+                // it.producto_id en ops_hs_items es el codigo string
+                const key = it.producto_id || it.codigo;
+                entregadoMap[key] = (entregadoMap[key] || 0) + (it.cantidad_hs || it.cantidad || 0);
             });
         });
 
-        const inv = (typeof ModInventario !== 'undefined' && ModInventario.loadStock)
-            ? await ModInventario.loadStock()
-            : (typeof ModInventario !== 'undefined' && ModInventario.getStock)
-                ? ModInventario.getStock()
-                : {};
+        // El mapa de stock se indexa por codigo string (FK de ops_hs_items)
+        const inv = await ModInventario.loadStock();
 
         tbody.innerHTML = items.map((it, i) => {
-            const stock = Number(inv[it.producto_id] ?? 0);
-            const yaEntregado = entregadoMap[it.producto_id] || 0;
+            // Usar it.codigo para buscar el stock (inventario indexa por codigo string)
+            const codigoKey = it.codigo || String(it.producto_id);
+            const stock = Number(inv[codigoKey] ?? 0);
+            const yaEntregado = entregadoMap[codigoKey] || 0;
             const pendiente = Math.max(0, it.cantidad - yaEntregado);
             
             let valSugerido = Math.min(pendiente, stock);
@@ -460,11 +491,25 @@ export const ModHS = (() => {
             total_piezas: items.reduce((s, i) => s + i.cantidad_hs, 0),
             estatus: 'entregado',
             notas: document.getElementById('hs-notas').value,
-            items: items
         };
 
         const res = await DB.insert('ops_hs', nuevaHS);
         if (res.error) { App.toast('Error: ' + res.error, 'danger'); return; }
+
+        // Insertar cada item en ops_hs_items (tabla relacional)
+        for (const it of items) {
+            const codigoKey = it.codigo || String(it.producto_id);
+            if (codigoKey && it.cantidad_hs > 0) {
+                const itemRes = await DB.insert('ops_hs_items', {
+                    hs_id: res.id,
+                    producto_id: codigoKey,   // FK → cat_productos(codigo)
+                    cantidad_hs: it.cantidad_hs
+                });
+                if (itemRes?.error) {
+                    console.error('Error insertando item HS:', itemRes.error);
+                }
+            }
+        }
 
         const solId = document.getElementById('hs-solicitud-id').value;
         if (solId) {
@@ -516,9 +561,39 @@ export const ModHS = (() => {
         });
     }
 
+
     async function obtenerContratosConItems() {
-        const contratosDB = (await DB.getAll('ops_contratos', { orderBy: 'folio', ascending: false })) || [];
-        return contratosDB;
+        // Asegurar productos cargados para mapear producto_id numérico
+        if (ModProductos && ModProductos.getProductos().length === 0) {
+            await ModProductos.cargar();
+        }
+        const prods = ModProductos ? ModProductos.getProductos() : [];
+
+        const [contratosDB, itemsRaw] = await Promise.all([
+            DB.getAll('ops_contratos', { orderBy: 'folio', ascending: false }),
+            DB.getAll('ops_contratos_items')
+        ]);
+
+        const itemsDB = itemsRaw || [];
+        const itemsMap = {};
+        itemsDB.forEach(it => {
+            if (!itemsMap[it.contrato_id]) itemsMap[it.contrato_id] = [];
+            // Soportar producto_id guardado como número o como código string (legado)
+            const prodByNum = prods.find(p => p.id === parseInt(it.producto_id));
+            const prodByCod = prods.find(p => p.codigo === String(it.producto_id));
+            const prod = prodByNum || prodByCod || {};
+            itemsMap[it.contrato_id].push({
+                ...it,
+                producto_id: prod.id || parseInt(it.producto_id) || it.producto_id,
+                codigo: prod.codigo || String(it.producto_id),
+                nombre: prod.nombre || 'Producto Desconocido'
+            });
+        });
+
+        return (contratosDB || []).map(c => ({
+            ...c,
+            items: itemsMap[c.id] || c.items || []
+        }));
     }
 
     async function nextFolioHS() {

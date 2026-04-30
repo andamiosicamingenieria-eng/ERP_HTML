@@ -386,10 +386,11 @@ export const ModInventario = (() => {
         App.toast('Excel de inventario descargado', 'success');
     }
 
-    // Retorna un mapa productoId → disponible (para módulo HS)
+    // Retorna un mapa codigo → disponible (para módulo HS)
+    // Usa el código string porque ops_hs_items.producto_id FK → cat_productos(codigo)
     function getStock() {
         const map = {};
-        inventario.forEach(i => { map[i.producto_id] = i.cantidad_disponible || 0; });
+        inventario.forEach(i => { map[i.codigo] = i.cantidad_disponible || 0; });
         return map;
     }
 

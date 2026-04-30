@@ -81,6 +81,11 @@ export const ModContratos = (() => {
     }
 
     async function cargarContratos() {
+        // Asegurar que el catálogo de productos esté cargado antes de mapear items
+        if (ModProductos && ModProductos.getProductos().length === 0) {
+            await ModProductos.cargar();
+        }
+
         const [raw, itemsRaw, todasHS, todasHE] = await Promise.all([
             DB.getAll('ops_contratos', { orderBy: 'folio', ascending: false }),
             DB.getAll('ops_contratos_items'),
@@ -95,10 +100,11 @@ export const ModContratos = (() => {
         const itemsMap = {};
         itemsDB.forEach(it => {
             if (!itemsMap[it.contrato_id]) itemsMap[it.contrato_id] = [];
+            // producto_id en BD es el código string (FK a cat_productos(codigo))
             const prod = prods.find(p => p.codigo === it.producto_id) || {};
             itemsMap[it.contrato_id].push({
                 ...it,
-                codigo: it.producto_id,
+                codigo: it.producto_id,      // el codigo string es el FK
                 nombre: prod.nombre || 'Producto Desconocido'
             });
         });
@@ -642,11 +648,12 @@ export const ModContratos = (() => {
             const idx = contratos.findIndex(c => c.id === id);
             contratos[idx] = { ...contratos[idx], ...payload };
             
-            // Re-insertar items
+            // Re-insertar items en ops_contratos_items
             if (!DEMO_MODE) {
                 await DB.deleteWhere('ops_contratos_items', 'contrato_id', id);
                 for (const it of items) {
                     if (it.codigo && it.cantidad > 0) {
+                        // producto_id es el código string (FK a cat_productos(codigo))
                         await DB.insert('ops_contratos_items', { contrato_id: id, producto_id: it.codigo, cantidad: it.cantidad, precio_unitario: it.precio_unitario });
                     }
                 }
@@ -665,6 +672,7 @@ export const ModContratos = (() => {
             if (!DEMO_MODE && nuevo.id) {
                 for (const it of items) {
                     if (it.codigo && it.cantidad > 0) {
+                        // producto_id es el código string (FK a cat_productos(codigo))
                         await DB.insert('ops_contratos_items', { contrato_id: nuevo.id, producto_id: it.codigo, cantidad: it.cantidad, precio_unitario: it.precio_unitario });
                     }
                 }

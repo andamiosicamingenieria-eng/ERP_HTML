@@ -2,6 +2,7 @@ import { DB, DEMO_MODE } from '../supabase-client.js';
 import { Utils } from '../utils.js';
 import { PDFGenerator } from './pdf-generator.js';
 import { ModContratos } from './contratos.js';
+import { ModProductos } from './productos.js';
 
 
 /**
@@ -98,12 +99,41 @@ export const ModHE = (() => {
     }
 
     async function cargarHE() {
-        const [raw, contratosRaw, solsRaw] = await Promise.all([
+        // Cargar productos para enriquecer items con nombre
+        if (ModProductos && ModProductos.getProductos().length === 0) {
+            await ModProductos.cargar();
+        }
+        const prods = ModProductos ? ModProductos.getProductos() : [];
+
+        const [raw, heItemsRaw, contratosRaw, solsRaw] = await Promise.all([
             DB.getAll('ops_he', { orderBy: 'folio', ascending: false }),
+            DB.getAll('ops_he_items'),
             DB.getAll('ops_contratos', { orderBy: 'folio', ascending: false }),
             DB.getAll('ops_solicitudes', { filter: { estatus: 'pendiente', tipo: 'recoleccion' } })
         ]);
-        heData = raw || [];
+
+        // Agrupar items de ops_he_items por he_id y enriquecer con codigo/nombre
+        const heItemsMap = {};
+        (heItemsRaw || []).forEach(it => {
+            if (!heItemsMap[it.he_id]) heItemsMap[it.he_id] = [];
+            const prod = prods.find(p => p.codigo === it.producto_id) || {};
+            heItemsMap[it.he_id].push({
+                ...it,
+                codigo: it.producto_id,          // producto_id ya es el código string
+                nombre: prod.nombre || it.producto_id,
+            });
+        });
+
+        heData = (raw || []).map(h => {
+            const items = heItemsMap[h.id] || h.items || [];
+            return {
+                ...h,
+                items,
+                // Recalcular total_piezas desde items si no está guardado
+                total_piezas: h.total_piezas || items.reduce((s, it) => s + (parseFloat(it.cantidad_recolectada) || 0), 0)
+            };
+        });
+
         solicitudesPendientes = solsRaw || [];
         contratosModal = contratosRaw || [];
         const contratosConItems = (contratosRaw || []).map(c => ({
@@ -503,13 +533,31 @@ export const ModHE = (() => {
             vaciado_fabricacion: false,
             operador: document.getElementById('he-operador').value.trim() || null,
             notas: document.getElementById('he-notas').value.trim() || null,
-            items,
+            // items van a ops_he_items (tabla relacional), no como JSONB aquí
         };
 
         const res = await DB.insert('ops_he', nuevaHE);
         if (res.error) {
             App.toast('Error al guardar: ' + res.error, 'danger');
             return;
+        }
+
+        // Insertar cada item en ops_he_items (tabla relacional)
+        for (const it of items) {
+            const codigoKey = it.codigo || String(it.producto_id);
+            if (codigoKey && it.cantidad_recolectada > 0) {
+                const itemRes = await DB.insert('ops_he_items', {
+                    he_id: res.id,
+                    producto_id: codigoKey,          // FK → cat_productos(codigo)
+                    cantidad_recolectada: it.cantidad_recolectada,
+                    cantidad_buena: 0,
+                    cantidad_dano: 0,
+                    cantidad_perdida: 0
+                });
+                if (itemRes?.error) {
+                    console.error('Error insertando item HE:', itemRes.error);
+                }
+            }
         }
 
         // Marcar solicitud como completada si aplica
